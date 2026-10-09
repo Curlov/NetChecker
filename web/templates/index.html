@@ -1,0 +1,156 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>NetChecker</title>
+
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1>NetChecker</h1>
+        <p>Netzwerküberwachung und Geräteanalyse</p>
+    </div>
+    <span id="connection-status">Verbinde...</span>
+</header>
+
+<main>
+    <section class="toolbar">
+        <div>
+            <label for="network-select">Netzwerk</label>
+            <select id="network-select">
+                <option value="">Netzwerk auswählen</option>
+            </select>
+        </div>
+
+        <div>
+            <label for="search">Gerät suchen</label>
+            <input id="search" type="search"
+                   placeholder="IP, MAC, Hersteller, Hostname ...">
+        </div>
+
+        <div>
+            <label for="category-select">Gerätetyp</label>
+            <select id="category-select">
+                <option value="">Alle Gerätetypen</option>
+            </select>
+        </div>
+
+        <button id="refresh-button" type="button">
+            Aktualisieren
+        </button>
+    </section>
+
+    <section class="stats">
+        <article>
+            <span>Geräteeinträge</span>
+            <strong id="device-count">0</strong>
+        </article>
+        <article>
+            <span>Erreichbar</span>
+            <strong id="present-count">0</strong>
+        </article>
+        <article>
+            <span>Unbekannter Typ</span>
+            <strong id="unknown-count">0</strong>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Geräteübersicht</h2>
+            <span id="last-update">Noch nicht geladen</span>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>IP-Adresse</th>
+                        <th>Hostname</th>
+                        <th>Hersteller</th>
+                        <th>Gerätetyp</th>
+                        <th>MAC-Adresse</th>
+                        <th>Status</th>
+                        <th>Konfidenz</th>
+                    </tr>
+                </thead>
+                <tbody id="device-table">
+                    <tr>
+                        <td colspan="7">
+                            Bitte Netzwerk auswählen.
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+   
+<section class="panel" id="detail-panel" hidden>
+    <div class="panel-heading">
+        <div>
+            <h2 id="detail-title">Gerätedetails</h2>
+            <span id="detail-subtitle"></span>
+        </div>
+        <button id="close-detail" type="button">
+            Schließen
+        </button>
+    </div>
+
+    <div class="detail-grid">
+        <article class="detail-card">
+            <h3>Geräteinformationen</h3>
+            <div id="detail-general"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Klassifikation</h3>
+            <div id="detail-classification"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Betriebssystem</h3>
+            <div id="detail-os"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Netzwerkadressen</h3>
+            <div id="detail-addresses"></div>
+        </article>
+    </div>
+
+    <div class="detail-card">
+        <h3>Erkannte Ports und Dienste</h3>
+        <div id="detail-ports"></div>
+    </div>
+
+    <div class="detail-grid">
+        <article class="detail-card">
+            <h3>Klassifikationshistorie</h3>
+            <div id="detail-history"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Erkannte Veränderungen</h3>
+            <div id="detail-changes"></div>
+        </article>
+    </div>
+
+    <div class="detail-card">
+        <h3>Topologiehinweise</h3>
+        <div id="detail-topology"></div>
+    </div>
+</section>
+
+</main>
+
+</body>
+</html>

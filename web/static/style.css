@@ -1,0 +1,265 @@
+
+:root {
+    font-family: Arial, sans-serif;
+    color: #e5e7eb;
+    background: #0f172a;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+}
+
+header {
+    background: #111c30;
+    border-bottom: 1px solid #334155;
+    padding: 22px 36px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+h1, h2, p {
+    margin-top: 0;
+}
+
+h1 {
+    color: #38bdf8;
+    margin-bottom: 5px;
+}
+
+header p {
+    color: #94a3b8;
+    margin-bottom: 0;
+}
+
+main {
+    max-width: 1700px;
+    margin: auto;
+    padding: 28px;
+}
+
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.toolbar > div {
+    flex: 1;
+    min-width: 190px;
+}
+
+label {
+    display: block;
+    margin-bottom: 8px;
+    color: #94a3b8;
+}
+
+input, select, button {
+    width: 100%;
+    padding: 11px;
+    border-radius: 7px;
+    border: 1px solid #475569;
+    background: #1e293b;
+    color: #e5e7eb;
+}
+
+button {
+    width: auto;
+    cursor: pointer;
+    background: #0369a1;
+    border-color: #0284c7;
+}
+
+button:hover {
+    background: #0284c7;
+}
+
+.stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin-bottom: 24px;
+}
+
+.stats article, .panel {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 20px;
+}
+
+.stats span {
+    display: block;
+    color: #94a3b8;
+    margin-bottom: 10px;
+}
+
+.stats strong {
+    font-size: 30px;
+}
+
+.panel {
+    margin-bottom: 24px;
+}
+
+.panel-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.panel-heading h2 {
+    margin: 0;
+}
+
+#last-update {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+.table-container {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+th, td {
+    padding: 13px;
+    border-bottom: 1px solid #334155;
+    white-space: nowrap;
+}
+
+th {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+tbody tr:hover {
+    background: #334155;
+}
+
+tbody tr[data-device-id] {
+    cursor: pointer;
+}
+
+.status-present {
+    color: #4ade80;
+}
+
+.status-other {
+    color: #fbbf24;
+}
+
+#connection-status {
+    color: #94a3b8;
+}
+
+#device-detail {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 550px;
+    overflow-y: auto;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+@media (max-width: 700px) {
+    header {
+        padding: 18px;
+    }
+
+    main {
+        padding: 14px;
+    }
+
+    .stats {
+        grid-template-columns: 1fr;
+    }
+}
+
+
+/* NetChecker - Gerätedetails */
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.detail-card {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 9px;
+    padding: 20px;
+    margin-bottom: 16px;
+    min-width: 0;
+}
+
+.detail-grid .detail-card {
+    margin-bottom: 0;
+}
+
+.detail-card h3 {
+    color: #38bdf8;
+    margin: 0 0 18px;
+    font-size: 16px;
+}
+
+.detail-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 15px;
+    padding: 9px 0;
+    border-bottom: 1px solid #1e293b;
+}
+
+.detail-line span:first-child {
+    color: #94a3b8;
+}
+
+.detail-line span:last-child {
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.detail-empty {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+.detail-table {
+    width: 100%;
+}
+
+.detail-table td,
+.detail-table th {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+#detail-subtitle {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+@media (max-width: 800px) {
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+}

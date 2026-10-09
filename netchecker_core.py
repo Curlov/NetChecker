@@ -41,7 +41,7 @@ from scanner import (
 )
 
 from vendor import get_vendor_from_mac
-
+from local_host import enrich_local_host
 
 # ==========================================================
 # Dauerbetrieb
@@ -212,6 +212,13 @@ def run_discovery_cycle(
             interface_info[
                 "network"
             ]
+        )
+
+        # Eigene Schnittstelleninformationen ergänzen.
+        # Keine zusätzlichen Netzwerkabfragen.
+        hosts = enrich_local_host(
+            hosts,
+            interface_info["interface"]
         )
 
 
