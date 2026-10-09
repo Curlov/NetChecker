@@ -1,0 +1,26 @@
+netchecker.py
+  python3 netchecker.py
+  → normaler Dauerbetrieb
+  → Discovery, Detail, Enrichment, Topologie automatisch
+
+netchecker_core.py
+  python3 netchecker_core.py
+  → nur der eigentliche Scanner-Core
+  → normalerweise nicht nötig, eher für Tests/Fehlersuche
+
+topology.py
+  python3 topology.py
+  → nur lokale/passive Topologie
+
+  python3 topology.py --routeros 192.168.10.153 --routeros-user admin
+  → zusätzlich MikroTik/RouterOS READ-ONLY auslesen
+
+  python3 topology.py --json-out
+  → Topologie zusätzlich nach data/topology_latest.json exportieren
+
+  python3 topology.py --routeros 192.168.10.153 --routeros-user admin --json-out
+  → RouterOS + JSON
+
+  python3 topology.py --reconcile-only
+  → nur vorhandene SQLite-/LLDP-Evidenz neu auswerten
+  → kein Netzwerkzugriff

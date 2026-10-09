@@ -1,0 +1,263 @@
+
+cd ~/source/netchecker
+source .venv/bin/activate
+
+python3 netchecker.py
+sudo .venv/bin/python3 netchecker.py            <- NetChecker mit Sudo Rechten starten
+
+deactivate
+
+======================================================================================
+=================================== NetChecker =======================================
+======================================================================================
+
+NETCHECKER – DATEIEN & AUFGABEN
+===============================
+
+netchecker.py
+-------------
+Hauptsteuerung des NetChecker.
+
+- startet den eigentlichen Scanner
+- koordiniert den Dauerbetrieb
+- integriert die automatische Topologie
+- verhindert parallele SQLite-Schreibzugriffe
+- sorgt für den sicheren Ablauf im Produktivnetz
+
+
+netchecker_core.py
+------------------
+Eigentliche Scan-Engine.
+
+- Discovery
+- Detail-Scans
+- Klassifikation
+- OS-Enrichment
+- Änderungserkennung
+- zeitgesteuerte Scanläufe
+
+
+network.py
+----------
+Ermittelt die lokalen Netzwerkinformationen des NetChecker.
+
+Zum Beispiel:
+
+- Netzwerkinterface
+- eigene IP-Adresse
+- eigene MAC-Adresse
+- Netz / CIDR
+- Gateway
+
+
+scanner.py
+----------
+Enthält die eigentlichen Nmap-Funktionen.
+
+Aufgaben:
+
+- Geräte finden
+- Ports untersuchen
+- Dienste erkennen
+- Betriebssysteme erkennen
+
+
+vendor.py
+---------
+Ermittelt anhand einer MAC-Adresse den Hersteller eines Gerätes.
+
+Zum Beispiel:
+
+- Ubiquiti
+- MikroTik
+- HPE
+- Yealink
+- Raspberry Pi
+- Dell
+
+
+database.py
+-----------
+Zentrale SQLite-Datenhaltung.
+
+Datenbank:
+
+data/netchecker.db
+
+Gespeichert werden unter anderem:
+
+- Netzwerke
+- Geräte
+- IP-Adressen
+- MAC-Adressen
+- Ports
+- Dienste
+- Betriebssysteme
+- Beobachtungen
+- Scan-Historie
+- Änderungen
+
+
+classifier.py
+-------------
+Bewertet die gesammelten Informationen und versucht daraus den Gerätetyp abzuleiten.
+
+Mögliche Kategorien:
+
+- Router / Firewall
+- Netzwerkgerät
+- Server
+- Virtualisierung
+- PC / Workstation
+- VoIP-Telefon
+- Drucker
+- IP-Kamera
+- USV / Stromversorgung
+- Single-Board-Computer
+- Apple-Gerät
+- Unbekannt
+
+Als Hinweise werden unter anderem verwendet:
+
+- Hersteller
+- Hostname
+- Ports
+- Dienste
+- Betriebssystem
+- Netzwerkrolle
+- Topologie-Evidenz
+
+
+classification_store.py
+-----------------------
+Speichert die Ergebnisse der Geräteklassifikation.
+
+Enthält sowohl:
+
+- aktuelle Klassifikation
+- historische Änderungen der Klassifikation
+
+
+enrichment.py
+-------------
+Untersucht Geräte genauer, wenn bisher nicht genügend Informationen vorhanden sind.
+
+Arbeitsweise:
+
+- Erreichbarkeit prüfen
+- LIGHT-Enrichment
+- bei Bedarf DEEP-Enrichment
+- brauchbare OS-Informationen speichern
+
+Bereits gute Ergebnisse sollen dabei nicht durch schlechtere Ergebnisse überschrieben werden.
+
+
+output.py
+---------
+Formatiert die Terminalausgabe des NetChecker.
+
+Zeigt beispielsweise:
+
+- Geräte-ID
+- IP
+- MAC
+- Hersteller
+- Hostname
+- Kategorie
+- Untertyp
+- Confidence
+- Betriebssystem
+- Ports
+- Zeitpunkte
+
+
+topology.py
+-----------
+Erfasst und verarbeitet die Netzwerktopologie.
+
+Lokale Informationen:
+
+- Routing-Tabelle
+- Gateway
+- Neighbor-/ARP-Informationen
+- bekannte Infrastruktur
+
+Zusätzliche RouterOS-Evidenz:
+
+- IP-Adressen
+- Routen
+- Bridges
+- Bridge-Ports
+- MAC-/FDB-Tabelle
+- ARP
+- DHCP
+- LLDP/MNDP-Nachbarn
+- Firewall-Regeln
+- NAT-Regeln
+
+Die Abfragen von Infrastrukturgeräten sind ausschließlich READ-ONLY.
+
+Topologie speichert außerdem:
+
+- Netzwerksegmente
+- Geräteinterfaces
+- Switchports
+- physische und logische Beziehungen
+- Multi-Homing
+- Identitätskandidaten
+- IP-/MAC-Widersprüche
+- persistente Gerätehinweise
+
+Starke Topologie-Evidenz wie LLDP kann bei der Klassifikation höher gewichtet werden als ein unsicherer Nmap-Fingerprint.
+
+
+data/netchecker.db
+------------------
+Zentrale und dauerhafte Datenbasis des NetChecker.
+
+Die Datenbank enthält nicht nur den aktuellen Zustand, sondern auch historische Informationen.
+
+Dadurch können später unterschiedliche Zeitpunkte und Veränderungen eines Kundennetzes ausgewertet werden.
+
+
+data/topology_latest.json
+-------------------------
+Aktueller exportierter Topologie-Snapshot.
+
+Gedacht für:
+
+- FastAPI
+- Weboberfläche
+- externe Weiterverarbeitung
+- Debugging
+
+Die SQLite-Datenbank bleibt die eigentliche dauerhafte Datenquelle.
+
+
+ZUSAMMENSPIEL
+=============
+
+network.py
+    |
+scanner.py
+    |
+database.py
+    |
+classifier.py
+    |
+classification_store.py
+    |
+enrichment.py
+    |
+topology.py
+    |
+SQLite / JSON
+    |
+später FastAPI-Weboberfläche
+
+
+netchecker_core.py
+= eigentliche Scan-Engine
+
+netchecker.py
+= übergeordnete Steuerung des Gesamtsystems

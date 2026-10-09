@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Laufzeit-/Netzwerkdaten
+data/*.db
+data/*.db-*
+data/*.json
+
+# Sicherungskopien
+*.bak
+*.bak_*
+*_backup*
+*_old*
+
+# Zugangsdaten
+.env
+*.key
+*.pem
