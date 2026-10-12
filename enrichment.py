@@ -1,9 +1,16 @@
+from transactions import atomic
 import argparse
+import json
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
 from classifier import classify_device
+from scan_parser import parse_services, scan_metadata
+from os_analysis import infer_os_claims, service_evidence_sufficient
+from runtime_lock import exclusive_cycle
+from datetime import datetime, timezone, timedelta
+import os
 
 from database import (
     abort_scan_run,
@@ -14,6 +21,8 @@ from database import (
     init_database,
     save_network,
     save_os_information,
+    save_port_scan,
+    save_os_claims,
     start_scan_run,
 )
 
@@ -115,51 +124,9 @@ DEEP_ADDITIONAL_PORTS = {
 # ==========================================================
 
 def init_enrichment_status_table(connection):
-    """
-    Speichert pro Gerät den bisherigen Enrichment-Zustand.
-
-    So scannen wir Geräte nicht immer wieder neu,
-    wenn LIGHT und DEEP bereits erfolglos waren.
-    """
-
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS enrichment_status (
-            network_id INTEGER NOT NULL,
-            device_id INTEGER NOT NULL,
-
-            status TEXT NOT NULL,
-
-            light_attempted INTEGER NOT NULL DEFAULT 0,
-            deep_attempted INTEGER NOT NULL DEFAULT 0,
-
-            last_stage TEXT,
-            last_result TEXT,
-
-            last_os_name TEXT,
-            last_os_accuracy INTEGER,
-
-            last_attempted_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            updated_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            PRIMARY KEY (
-                network_id,
-                device_id
-            ),
-
-            FOREIGN KEY (network_id)
-                REFERENCES networks(id),
-
-            FOREIGN KEY (device_id)
-                REFERENCES devices(id)
-        )
-        """
-    )
-
-    connection.commit()
+    """Compatibility entry point for the central schema coordinator."""
+    from schema import initialize_database
+    initialize_database(connection)
 
 
 def get_enrichment_status(
@@ -925,7 +892,16 @@ def parse_scan_xml(xml_path):
         "status": "success",
         "os": None,
         "message": None,
+        "ports": parse_services(host_element),
+        "scan_metadata": scan_metadata(root, host_element),
+        "os_classes": [dict(element.attrib, cpe=[c.text for c in element.findall('cpe') if c.text])
+                       for element in host_element.findall('os/osmatch/osclass')],
+        "os_matches": [dict(element.attrib) for element in host_element.findall('os/osmatch')],
+        "host_scripts": [ET.tostring(element, encoding='unicode') for element in host_element.findall('hostscript')],
     }
+    if not result['scan_metadata']['complete']:
+        result['status'] = 'incomplete'
+        result['message'] = 'Unvollstaendiger Scan; keine dauerhafte Negativentscheidung'
 
 
     # ======================================================
@@ -1322,6 +1298,22 @@ def save_detected_os(
 # Präsenz laut Datenbank
 # ==========================================================
 
+def persist_enrichment_result(connection, network_id, scan_run_id, device, result, stage):
+    if result.get('status') not in {'success', 'incomplete'}:
+        return
+    host = dict(result, device_id=device['id'], ip=device.get('ip'))
+    with atomic(connection):
+        save_port_scan(connection, network_id, scan_run_id, host,
+                       source='nmap_' + stage, observation_type='service_scan')
+        save_os_claims(connection, network_id, scan_run_id, device['id'],
+                       infer_os_claims(result.get('os'), os_classes=result.get('os_classes') or [],
+                                       host_scripts=result.get('host_scripts') or []))
+        connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+            observation_type,source,data_json) VALUES(?,?,?,'enrichment_result',?,?)""",
+            (network_id,device['id'],scan_run_id,'nmap_' + stage,
+             json.dumps(host, ensure_ascii=False)))
+
+
 def get_present_device_ids(
     connection,
     network_id
@@ -1354,6 +1346,91 @@ def get_present_device_ids(
     }
 
 
+def build_service_ports(device):
+    """Service probes stay within TCP ports already observed as open."""
+    known = {int(port['port']) for port in device.get('ports') or ()
+                   if port.get('protocol') == 'tcp' and port.get('state') == 'open'
+                   and port.get('port') is not None and 1 <= int(port['port']) <= 65535}
+    requested = device.get('_service_ports')
+    return sorted(known if requested is None else known.intersection(requested))
+
+
+def service_enrichment_due(connection, network_id, device):
+    """Return due known ports and last attempt time; reuse recent complete probes."""
+    ports = build_service_ports(device)
+    if not ports or not device.get('ip'):
+        return [], ''
+    latest = connection.execute("""SELECT observation_type,data_json,observed_at FROM observations
+        WHERE network_id=? AND device_id=?
+          AND observation_type IN ('service_enrichment_attempt','service_scan')
+        ORDER BY id DESC LIMIT 1""", (network_id,device['id'])).fetchone()
+    if latest is None:
+        return ports, ''
+    try:
+        payload = json.loads(latest['data_json'] or '{}')
+        if not isinstance(payload,dict):
+            payload = {}
+    except (ValueError,TypeError):
+        payload = {}
+    complete = (payload.get('status') == 'success' if latest['observation_type']=='service_enrichment_attempt'
+                else bool((payload.get('scan_metadata') or {}).get('complete')))
+    now = datetime.now(timezone.utc)
+    if not complete and latest['observed_at'] >= (now-timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S'):
+        return [], latest['observed_at']
+    days = max(1,int(os.environ.get('NETCHECKER_SERVICE_RETRY_DAYS','7')))
+    cutoff = (now-timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    recent = connection.execute("""SELECT observation_type,data_json FROM observations
+        WHERE network_id=? AND device_id=? AND observed_at>=?
+          AND observation_type IN ('service_enrichment_attempt','service_scan')""",
+        (network_id,device['id'],cutoff))
+    covered = set()
+    from scan_parser import covered_port
+    for row in recent:
+        try:
+            result = json.loads(row['data_json'] or '{}')
+            if not isinstance(result,dict):
+                continue
+            if row['observation_type']=='service_enrichment_attempt' and result.get('status')=='success':
+                covered.update(result.get('requested_ports') or ())
+            elif row['observation_type']=='service_scan':
+                covered.update(port for port in ports if covered_port(result.get('scan_metadata') or {},'tcp',port))
+        except (ValueError,TypeError):
+            continue
+    return [port for port in ports if port not in covered], latest['observed_at']
+
+
+def scan_services(device):
+    ports = build_service_ports(device)
+    if not ports or not device.get('ip'):
+        return {'status':'no_ports','ports':[],'os':None}
+    with tempfile.TemporaryDirectory(prefix='netchecker_services_') as directory:
+        xml_path = f'{directory}/scan.xml'
+        command = ['sudo','nmap','-Pn','-n','-sS','-sV','--version-light',
+                   '-T4','--max-retries','1','--host-timeout','25s',
+                   '-p',','.join(str(port) for port in ports),'-oX',xml_path,device['ip']]
+        return execute_nmap(command,xml_path,LIGHT_PROCESS_TIMEOUT_SECONDS)
+
+
+def enrich_services(connection, network_id, scan_run_id, device):
+    """Independent LIGHT service stage; does not overwrite OS retry decisions."""
+    requested = build_service_ports(device)
+    try:
+        result = scan_services(device)
+    except (OSError,ValueError):
+        result = {'status':'nmap_error','ports':[],'os':None}
+    if result.get('status') == 'success' and not (result.get('scan_metadata') or {}).get('complete'):
+        result = dict(result,status='incomplete')
+    with atomic(connection):
+        persist_enrichment_result(connection,network_id,scan_run_id,device,result,'service_light')
+        connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+            observation_type,source,data_json) VALUES(?,?,?,'service_enrichment_attempt','nmap_service_light',?)""",
+            (network_id,device['id'],scan_run_id,json.dumps({'status':result.get('status'),
+                'requested_ports':requested,'scan_metadata':result.get('scan_metadata') or {}},ensure_ascii=False)))
+    success = result.get('status') == 'success'
+    return {'success':success,'technical_error':not success,'temporary_unreachable':False,
+            'timeout':result.get('status')=='timeout','stage':'service_light','os':None}
+
+
 # ==========================================================
 # Kandidaten auswählen
 # ==========================================================
@@ -1373,10 +1450,13 @@ def get_enrichment_targets(
 
     --force ignoriert diese gespeicherten Entscheidungen
     für genau eine angegebene IP.
+
+    Service-Enrichment wird unabhängig ausgewählt, auf bekannte offene
+    TCP-Ports beschränkt und separat budgetiert.
     """
 
     inventory = get_inventory(
-        connection
+        connection, network_id=network_id
     )
 
 
@@ -1387,6 +1467,7 @@ def get_enrichment_targets(
 
 
     targets = []
+    service_candidates = []
 
 
     stats = {
@@ -1396,6 +1477,8 @@ def get_enrichment_targets(
         "classified": 0,
         "no_os_detected": 0,
         "targets": 0,
+        "service_targets": 0,
+        "service_deferred": 0,
     }
 
 
@@ -1414,8 +1497,7 @@ def get_enrichment_targets(
 
 
         if (
-            present_ids
-            and device["id"]
+            device["id"]
             not in present_ids
         ):
 
@@ -1432,8 +1514,18 @@ def get_enrichment_targets(
             device["id"]
         )
 
+        # Select service work before applying OS-specific exclusion rules.
+        service_due, attempted_at = service_enrichment_due(connection,network_id,device)
+        if service_due and not force:
+            service_candidates.append((attempted_at,dict(device,_service_ports=service_due)))
+
 
         if not force:
+
+            summary = device.get('os_summary') or {}
+            if any(summary.get(kind) and not summary[kind].get('stale') for kind in ('family','distribution')):
+                stats['os_known'] += 1
+                continue
 
             if has_saved_os(
                 device
@@ -1451,6 +1543,15 @@ def get_enrichment_targets(
                 and status["status"]
                 == "no_os_detected"
             ):
+
+                # Automatic retries are opt-in; existing deployments keep their scan budget.
+                retry_days = max(0, int(os.environ.get('NETCHECKER_ENRICHMENT_RETRY_DAYS', '0')))
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=retry_days)).strftime('%Y-%m-%d %H:%M:%S')
+                if retry_days and status['last_attempted_at'] < cutoff:
+                    classification = classify_device(device)
+                    targets.append((device, classification))
+                    stats['targets'] += 1
+                    continue
 
                 stats[
                     "no_os_detected"
@@ -1493,9 +1594,23 @@ def get_enrichment_targets(
 
 
     return (
-        targets,
+        targets + select_service_targets(targets,service_candidates,stats),
         stats
     )
+
+
+def select_service_targets(os_targets, candidates, stats):
+    """Never service-probe a host twice in the same cycle; oldest attempts first."""
+    os_ids = {device['id'] for device,_ in os_targets}
+    eligible = sorted(((attempted,device) for attempted,device in candidates if device['id'] not in os_ids),
+                      key=lambda item:(item[0],item[1]['id']))
+    budget = max(0,int(os.environ.get('NETCHECKER_SERVICE_MAX_HOSTS','4')))
+    selected = [(dict(device,_enrichment_goal='service'),classify_device(device))
+                for _,device in eligible[:budget]]
+    stats['service_targets'] = len(selected)
+    stats['service_deferred'] = max(0,len(eligible)-len(selected))
+    stats['targets'] += len(selected)
+    return selected
 
 
 # ==========================================================
@@ -1541,6 +1656,8 @@ def print_selection_stats(stats):
         f"Neue Kandidaten..........: "
         f"{stats['targets']}"
     )
+    print(f"Service-Kandidaten.......: {stats['service_targets']}")
+    print(f"Service wegen Budget später: {stats['service_deferred']}")
 
     print("=" * 80)
 
@@ -1957,6 +2074,7 @@ def enrich_device(
         light_result = scan_light(
             device
         )
+        persist_enrichment_result(connection, network_id, scan_run_id, device, light_result, 'light')
 
 
         print_scan_result(
@@ -2070,6 +2188,14 @@ def enrich_device(
                 "os": light_os,
             }
 
+        if service_evidence_sufficient(light_result):
+            save_enrichment_status(connection, network_id, device_id,
+                status='service_evidence_found', light_attempted=True,
+                last_stage='light', last_result='service_evidence')
+            return {'success': True, 'technical_error': False,
+                    'temporary_unreachable': False, 'timeout': False,
+                    'stage': 'light', 'os': light_os}
+
 
     # ======================================================
     # 2. DEEP
@@ -2089,6 +2215,7 @@ def enrich_device(
     deep_result = scan_deep(
         device
     )
+    persist_enrichment_result(connection, network_id, scan_run_id, device, deep_result, 'deep')
 
 
     print_scan_result(
@@ -2244,7 +2371,7 @@ def run_enrichment(
         print()
         print(
             "Keine Geräte benötigen momentan "
-            "einen OS-Enrichment-Scan."
+            "einen Enrichment-Scan."
         )
 
         return
@@ -2267,6 +2394,7 @@ def run_enrichment(
 
     light_success = 0
     deep_success = 0
+    service_success = 0
 
     without_os = 0
 
@@ -2323,13 +2451,11 @@ def run_enrichment(
             )
 
 
-            result = enrich_device(
-                connection,
-                network_id,
-                scan_run_id,
-                device,
-                force=force
-            )
+            if device.get('_enrichment_goal') == 'service':
+                print('  Stufe: Service-LIGHT auf bekannten offenen TCP-Ports; keine OS-Erkennung')
+                result = enrich_services(connection,network_id,scan_run_id,device)
+            else:
+                result = enrich_device(connection,network_id,scan_run_id,device,force=force)
 
 
             if result[
@@ -2366,7 +2492,9 @@ def run_enrichment(
                     "success"
                 ]:
 
-                    if (
+                    if result['stage'] == 'service_light':
+                        service_success += 1
+                    elif (
                         result["stage"]
                         == "light"
                     ):
@@ -2388,7 +2516,7 @@ def run_enrichment(
 
             refreshed_devices = get_inventory(
                 connection,
-                device["id"]
+                device["id"], network_id=network_id
             )
 
 
@@ -2449,6 +2577,7 @@ def run_enrichment(
             f"DEEP erfolgreich.....: "
             f"{deep_success}"
         )
+        print(f"Service-LIGHT erfolgreich: {service_success}")
 
         print(
             f"OS nicht ermittelbar.: "
@@ -2557,6 +2686,7 @@ def parse_arguments():
 # Hauptprogramm
 # ==========================================================
 
+@exclusive_cycle
 def main():
 
     arguments = parse_arguments()

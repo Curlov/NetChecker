@@ -24,6 +24,10 @@
 <main>
     <section class="toolbar">
         <div>
+            <label for="api-key">API-Schlüssel (falls eingerichtet)</label>
+            <input id="api-key" type="password" autocomplete="off" placeholder="Nur für diese Sitzung">
+        </div>
+        <div>
             <label for="network-select">Netzwerk</label>
             <select id="network-select">
                 <option value="">Netzwerk auswählen</option>
@@ -37,10 +41,14 @@
         </div>
 
         <div>
-            <label for="category-select">Gerätetyp</label>
-            <select id="category-select">
+            <label id="category-label" for="category-select">Gerätetyp</label>
+            <select id="category-select" hidden aria-hidden="true" tabindex="-1">
                 <option value="">Alle Gerätetypen</option>
             </select>
+            <details id="category-menu" class="category-menu">
+                <summary id="category-trigger" aria-labelledby="category-label category-trigger">Alle Gerätetypen</summary>
+                <div id="category-options" class="category-options" role="group" aria-label="Gerätetyp auswählen"></div>
+            </details>
         </div>
 
         <button id="refresh-button" type="button">
@@ -118,10 +126,15 @@
 
         <article class="detail-card">
             <h3>Betriebssystem</h3>
+            <div id="detail-os-summary"></div>
             <div id="detail-os"></div>
         </article>
-
         <article class="detail-card">
+            <h3>MAC-Analyse</h3>
+            <div id="detail-mac"></div>
+        </article>
+
+        <article class="detail-card detail-card-wide">
             <h3>Netzwerkadressen</h3>
             <div id="detail-addresses"></div>
         </article>
@@ -131,14 +144,28 @@
         <h3>Erkannte Ports und Dienste</h3>
         <div id="detail-ports"></div>
     </div>
+    <div class="detail-card">
+        <h3>Quellen und Evidenz zum Betriebssystem</h3>
+        <div id="detail-os-claims"></div>
+    </div>
+    <div class="detail-card">
+        <h3>Identitätszuordnung und Schnittstellen</h3>
+        <div id="detail-identity"></div>
+        <div id="detail-interfaces"></div>
+        <div id="detail-identity-candidates"></div>
+    </div>
+    <div class="detail-card">
+        <h3>Service-Beobachtungen</h3>
+        <div id="detail-port-history"></div>
+    </div>
 
     <div class="detail-grid">
-        <article class="detail-card">
+        <article class="detail-card detail-card-wide">
             <h3>Klassifikationshistorie</h3>
             <div id="detail-history"></div>
         </article>
 
-        <article class="detail-card">
+        <article class="detail-card detail-card-wide">
             <h3>Erkannte Veränderungen</h3>
             <div id="detail-changes"></div>
         </article>
@@ -148,6 +175,25 @@
         <h3>Topologiehinweise</h3>
         <div id="detail-topology"></div>
     </div>
+</section>
+
+<section class="panel" id="topology-panel">
+    <div class="panel-heading"><h2>Netzwerktopologie</h2><span id="topology-status"></span></div>
+    <p>Verbindungen zeigen gespeicherte Evidenz. ARP, DHCP und gelernte MAC-Adressen belegen keine direkte Verkabelung.</p>
+    <p>Geräte-Icons zeigen die aktuelle Geräteklasse. Grün: zuletzt erreichbar; Rot: als fehlend erkannt; Grau: Status unbekannt. Farben und Klassen beziehen sich auf den aktuellen Inventarstatus, auch bei älteren Snapshots.</p>
+    <div class="toolbar">
+        <div><label for="topology-snapshot">Ziel-Snapshot (danach)</label><select id="topology-snapshot"></select></div>
+        <div><label for="topology-before">Ausgangs-Snapshot (davor)</label><select id="topology-before"></select></div>
+        <button id="topology-compare" type="button">Vergleichen</button>
+        <button id="topology-reset" type="button">Ansicht zurücksetzen</button>
+    </div>
+    <p class="detail-empty">Hintergrund ziehen, um die gesamte Ansicht zu verschieben. Geräte rasten beim Loslassen im Raster ein; auf belegten Plätzen tauschen die Geräte ihre Position. Pfeiltasten bewegen Geräte um einen Rasterplatz. Mit dem Mausrad zoomen; Verbindung anklicken, um ihre Evidenz zu sehen.</p>
+    <div class="topology-viewport" role="region" aria-label="Scrollbare Netzwerktopologie" tabindex="0">
+        <svg id="topology-graph" role="img" aria-label="Topologie der gespeicherten Netzwerkbeobachtungen" viewBox="0 0 1000 500"></svg>
+    </div>
+    <pre id="topology-evidence" tabindex="0"></pre>
+    <div id="topology-diff"></div>
+    <h3>Beobachtete Segmente</h3><div id="topology-segments"></div>
 </section>
 
 </main>

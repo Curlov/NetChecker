@@ -4,6 +4,10 @@ import ipaddress
 from fastapi import APIRouter, HTTPException, Query
 
 from web.database import get_connection
+from database import get_port_inventory, get_os_history, get_os_claims, get_os_claims_for_devices
+from os_analysis import summarize_claims
+from mac_analysis import analyze_mac
+from web.access import allowed_scopes, require_network
 
 
 router = APIRouter(
@@ -53,6 +57,14 @@ def ip_sort_key(device):
 # Geräteübersicht
 # ==========================================================
 
+def sqlite_ip_order(value):
+    """Fixed-width keys retain IPv4/IPv6 numeric order inside SQLite pagination."""
+    try:
+        address = ipaddress.ip_address(value)
+        return f'0{address.version}{int(address):032x}'
+    except (ValueError,TypeError):
+        return '1'
+
 @router.get("")
 def get_devices(
     network_id: int | None = Query(default=None, ge=1),
@@ -81,6 +93,7 @@ def get_devices(
             a.ip,
             a.network_id,
             n.cidr AS network,
+            n.scope_id AS network_scope,
 
             dc.category,
             dc.subtype,
@@ -89,10 +102,12 @@ def get_devices(
             dp.state AS presence,
 
             (
-                SELECT oi.name
-                FROM os_information oi
-                WHERE oi.device_id = d.id
+                SELECT json_extract(oi.data_json, '$.os.name')
+                FROM observations oi
+                WHERE oi.device_id = d.id AND oi.network_id=a.network_id
+                  AND oi.observation_type='os_detection' AND json_valid(oi.data_json)
                 ORDER BY
+                    (CAST(json_extract(oi.data_json, '$.os.accuracy') AS INTEGER)>=70) DESC,
                     oi.observed_at DESC,
                     oi.id DESC
                 LIMIT 1
@@ -115,23 +130,30 @@ def get_devices(
             AND dp.network_id = a.network_id
 
         WHERE (? IS NULL OR a.network_id = ?)
+          AND a.id = (SELECT latest.id FROM addresses latest
+                      WHERE latest.device_id=d.id AND latest.network_id=a.network_id
+                      ORDER BY latest.last_seen DESC,latest.id DESC LIMIT 1)
     """
 
     with get_connection() as db:
+        if network_id is not None:
+            require_network(db, network_id)
+        scopes = sorted(allowed_scopes(db))
+        sql += ' AND n.scope_id IN (' + ','.join('?' for _ in scopes) + ')'
+        parameters = (network_id,network_id,*scopes)
+        db.create_function('netchecker_ip_order',1,sqlite_ip_order,deterministic=True)
+        total = db.execute('SELECT COUNT(*) FROM (' + sql + ')',parameters).fetchone()[0]
         rows = db.execute(
-            sql,
-            (network_id, network_id)
+            sql + ' ORDER BY netchecker_ip_order(a.ip),d.id,n.id LIMIT ? OFFSET ?',
+            (*parameters,limit,offset)
         ).fetchall()
 
-    devices = [dict(row) for row in rows]
+        page = [dict(row) for row in rows]
+        claims = get_os_claims_for_devices(db, [(device['network_id'],device['id']) for device in page])
+        for device in page:
+            device['mac_analysis'] = analyze_mac(device['mac'])
+            device['os_summary'] = summarize_claims(claims.get((device['network_id'],device['id']), []))
 
-    # Zuerst alle Ergebnisse numerisch sortieren.
-    devices.sort(key=ip_sort_key)
-
-    total = len(devices)
-
-    # Erst danach die angeforderte Seite auswählen.
-    page = devices[offset:offset + limit]
 
     return {
         "total": total,
@@ -160,6 +182,7 @@ def get_device(
     """
 
     with get_connection() as db:
+        require_network(db, network_id)
 
         # --------------------------------------------------
         # Geräteidentität im ausgewählten Netzwerk prüfen
@@ -225,24 +248,25 @@ def get_device(
         # Ports und Dienste
         # --------------------------------------------------
 
-        ports = db.execute("""
-            SELECT *
-            FROM ports
-            WHERE device_id = ?
-            ORDER BY protocol, port
-        """, (device_id,)).fetchall()
+        ports = get_port_inventory(db, network_id, device_id)
 
         # --------------------------------------------------
         # Betriebssysteminformationen
         # --------------------------------------------------
 
-        os_info = db.execute("""
-            SELECT *
-            FROM os_information
-            WHERE device_id = ?
-            ORDER BY observed_at DESC, id DESC
-            LIMIT 20
-        """, (device_id,)).fetchall()
+        os_info = get_os_history(db, network_id, device_id)[:20]
+        os_claims = get_os_claims(db, network_id, device_id)
+        port_history = db.execute("""SELECT source,observed_at,scan_run_id,data_json
+            FROM observations WHERE network_id=? AND device_id=?
+            AND observation_type IN ('tcp_port_scan','service_scan') ORDER BY id DESC LIMIT 100""",
+            (network_id,device_id)).fetchall()
+        identity_candidates = db.execute("""SELECT * FROM identity_candidates
+            WHERE network_id=? AND (device_id=? OR candidate_device_id=?) ORDER BY id DESC LIMIT 50""",
+            (network_id,device_id,device_id)).fetchall()
+        interfaces = db.execute('SELECT * FROM device_interfaces WHERE device_id=? AND scope_id=? ORDER BY last_seen DESC,id DESC',
+                                (device_id,device['scope_id'])).fetchall()
+        last_identity = db.execute("""SELECT data_json,observed_at FROM observations WHERE network_id=? AND device_id=?
+            AND observation_type='host_discovery' ORDER BY id DESC LIMIT 1""", (network_id,device_id)).fetchone()
 
         # --------------------------------------------------
         # Klassifikationshistorie
@@ -301,6 +325,13 @@ def get_device(
 
     return {
         "device": dict(device),
+        "mac_analysis": analyze_mac(device['mac']),
+        "os_summary": summarize_claims(os_claims),
+        "os_claims": os_claims,
+        "port_history": [dict(row) for row in port_history],
+        "identity_candidates": [dict(row) for row in identity_candidates],
+        "interfaces": [dict(row) for row in interfaces],
+        "last_identity_observation": dict(last_identity) if last_identity else None,
         "network_id": network_id,
         "addresses": [dict(row) for row in addresses],
         "classification": (

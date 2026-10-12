@@ -1,7 +1,12 @@
+from transactions import atomic
+from logging_utils import event
 import json
+import os
 import sqlite3
 from pathlib import Path
-
+from mac_analysis import normalize_mac, analyze_mac
+from scan_parser import covered_port
+from os_analysis import infer_os_claims, summarize_claims, select_os
 
 IP_MATCH_WINDOW_MINUTES = 60
 
@@ -10,11 +15,7 @@ IP_MATCH_WINDOW_MINUTES = 60
 MISSING_CONFIRMATION_SCANS = 2
 
 
-DATABASE_PATH = (
-    Path(__file__).resolve().parent
-    / "data"
-    / "netchecker.db"
-)
+from runtime_config import DATABASE_PATH
 
 
 # ==========================================================
@@ -77,372 +78,9 @@ def get_table_columns(
 # ==========================================================
 
 def init_database(connection):
-    """
-    Erstellt alle Tabellen.
-
-    Bereits vorhandene Datenbanken bleiben erhalten.
-    Fehlende ältere Spalten werden automatisch ergänzt.
-    """
-
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS networks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            cidr TEXT NOT NULL,
-            interface TEXT NOT NULL,
-            gateway TEXT,
-
-            first_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            last_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            UNIQUE(cidr, interface)
-        );
-
-
-        CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            mac TEXT UNIQUE,
-            vendor TEXT,
-            hostname TEXT,
-
-            identity_status TEXT NOT NULL
-                DEFAULT 'provisional',
-
-            first_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            last_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP
-        );
-
-
-        CREATE TABLE IF NOT EXISTS addresses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            device_id INTEGER NOT NULL,
-            network_id INTEGER NOT NULL,
-
-            ip TEXT NOT NULL,
-
-            first_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            last_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id),
-
-            FOREIGN KEY(network_id)
-                REFERENCES networks(id),
-
-            UNIQUE(
-                device_id,
-                network_id,
-                ip
-            )
-        );
-
-
-        CREATE TABLE IF NOT EXISTS ports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            device_id INTEGER NOT NULL,
-
-            protocol TEXT NOT NULL,
-            port INTEGER NOT NULL,
-
-            state TEXT,
-
-            service TEXT,
-            product TEXT,
-            version TEXT,
-
-            first_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            last_seen TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id),
-
-            UNIQUE(
-                device_id,
-                protocol,
-                port
-            )
-        );
-
-
-        CREATE TABLE IF NOT EXISTS os_information (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            device_id INTEGER NOT NULL,
-
-            name TEXT,
-            accuracy INTEGER,
-            source TEXT,
-
-            observed_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id)
-        );
-
-
-        CREATE TABLE IF NOT EXISTS scan_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            network_id INTEGER NOT NULL,
-
-            scan_type TEXT NOT NULL,
-
-            status TEXT NOT NULL
-                DEFAULT 'running',
-
-            started_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            finished_at TEXT,
-
-            hosts_found INTEGER,
-            hosts_processed INTEGER,
-            hosts_failed INTEGER,
-
-            error_message TEXT,
-
-            FOREIGN KEY(network_id)
-                REFERENCES networks(id)
-        );
-
-
-        CREATE TABLE IF NOT EXISTS observations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            network_id INTEGER,
-            device_id INTEGER,
-            scan_run_id INTEGER,
-
-            observation_type TEXT NOT NULL,
-            source TEXT,
-            data_json TEXT,
-
-            observed_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            FOREIGN KEY(network_id)
-                REFERENCES networks(id),
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id),
-
-            FOREIGN KEY(scan_run_id)
-                REFERENCES scan_runs(id)
-        );
-
-
-        CREATE TABLE IF NOT EXISTS changes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            network_id INTEGER NOT NULL,
-            device_id INTEGER,
-            scan_run_id INTEGER NOT NULL,
-
-            change_type TEXT NOT NULL,
-
-            old_value_json TEXT,
-            new_value_json TEXT,
-
-            detected_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            FOREIGN KEY(network_id)
-                REFERENCES networks(id),
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id),
-
-            FOREIGN KEY(scan_run_id)
-                REFERENCES scan_runs(id)
-        );
-
-
-        CREATE TABLE IF NOT EXISTS device_presence (
-            network_id INTEGER NOT NULL,
-            device_id INTEGER NOT NULL,
-
-            state TEXT NOT NULL
-                DEFAULT 'present',
-
-            consecutive_misses INTEGER NOT NULL
-                DEFAULT 0,
-
-            last_seen_scan_run_id INTEGER,
-
-            missing_since_scan_run_id INTEGER,
-
-            updated_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP,
-
-            PRIMARY KEY(
-                network_id,
-                device_id
-            ),
-
-            FOREIGN KEY(network_id)
-                REFERENCES networks(id),
-
-            FOREIGN KEY(device_id)
-                REFERENCES devices(id),
-
-            FOREIGN KEY(last_seen_scan_run_id)
-                REFERENCES scan_runs(id),
-
-            FOREIGN KEY(missing_since_scan_run_id)
-                REFERENCES scan_runs(id)
-        );
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_devices_mac
-        ON devices(mac);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_addresses_ip
-        ON addresses(ip);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_observations_time
-        ON observations(observed_at);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_changes_time
-        ON changes(detected_at);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_changes_device
-        ON changes(device_id);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_changes_scan_run
-        ON changes(scan_run_id);
-
-
-        CREATE INDEX IF NOT EXISTS
-            idx_device_presence_state
-        ON device_presence(
-            network_id,
-            state
-        );
-        """
-    )
-
-
-    # ======================================================
-    # Migration älterer Datenbanken
-    # ======================================================
-
-    device_columns = get_table_columns(
-        connection,
-        "devices"
-    )
-
-    if "identity_status" not in device_columns:
-
-        connection.execute(
-            """
-            ALTER TABLE devices
-            ADD COLUMN identity_status TEXT
-            NOT NULL DEFAULT 'provisional'
-            """
-        )
-
-
-    connection.execute(
-        """
-        UPDATE devices
-        SET identity_status = 'confirmed'
-        WHERE mac IS NOT NULL
-        """
-    )
-
-
-    observation_columns = get_table_columns(
-        connection,
-        "observations"
-    )
-
-    if "scan_run_id" not in observation_columns:
-
-        connection.execute(
-            """
-            ALTER TABLE observations
-            ADD COLUMN scan_run_id INTEGER
-            REFERENCES scan_runs(id)
-            """
-        )
-
-
-    scan_run_columns = get_table_columns(
-        connection,
-        "scan_runs"
-    )
-
-    if "hosts_processed" not in scan_run_columns:
-
-        connection.execute(
-            """
-            ALTER TABLE scan_runs
-            ADD COLUMN hosts_processed INTEGER
-            """
-        )
-
-
-    if "hosts_failed" not in scan_run_columns:
-
-        connection.execute(
-            """
-            ALTER TABLE scan_runs
-            ADD COLUMN hosts_failed INTEGER
-            """
-        )
-
-
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS
-            idx_addresses_lookup
-        ON addresses(
-            network_id,
-            ip,
-            last_seen
-        )
-        """
-    )
-
-
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS
-            idx_observations_scan_run
-        ON observations(scan_run_id)
-        """
-    )
-
-
-    connection.commit()
+    """Compatibility entry point for the central schema coordinator."""
+    from schema import initialize_database
+    initialize_database(connection)
 
 
 # ==========================================================
@@ -453,27 +91,31 @@ def save_network(
     connection,
     cidr,
     interface,
-    gateway
+    gateway,
+    scope_id=None,
 ):
     """
     Speichert oder aktualisiert ein Netzwerk.
     """
 
+    scope_id = get_scope_id(connection, scope_id)
     connection.execute(
         """
         INSERT INTO networks (
+            scope_id,
             cidr,
             interface,
             gateway
         )
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
 
-        ON CONFLICT(cidr, interface)
+        ON CONFLICT(scope_id, cidr, interface)
         DO UPDATE SET
             gateway = excluded.gateway,
             last_seen = CURRENT_TIMESTAMP
         """,
         (
+            scope_id,
             cidr,
             interface,
             gateway
@@ -490,10 +132,12 @@ def save_network(
 
         WHERE cidr = ?
           AND interface = ?
+          AND scope_id = ?
         """,
         (
             cidr,
-            interface
+            interface,
+            scope_id,
         )
     ).fetchone()
 
@@ -505,25 +149,42 @@ def save_network(
 # Geräteidentifikation
 # ==========================================================
 
+def get_scope_id(connection, scope_id=None):
+    scope_id = int(scope_id if scope_id is not None else os.environ.get('NETCHECKER_SCOPE_ID', '1'))
+    if not connection.execute('SELECT 1 FROM network_scopes WHERE id=?', (scope_id,)).fetchone():
+        raise ValueError('Unknown network scope; select an explicitly created customer/site')
+    return scope_id
+
+
+def network_scope_id(connection, network_id):
+    row = connection.execute('SELECT scope_id FROM networks WHERE id=?', (network_id,)).fetchone()
+    if row is None:
+        raise ValueError('Unknown network')
+    return row['scope_id']
+
+
 def find_device_by_mac(
     connection,
-    mac_address
+    mac_address,
+    network_id=None,
 ):
     """
     Sucht ein Gerät anhand seiner MAC-Adresse.
     """
 
+    mac_address = normalize_mac(mac_address)
     if not mac_address:
         return None
 
 
     return connection.execute(
         """
-        SELECT *
-        FROM devices
-        WHERE mac = ?
+        SELECT d.* FROM devices d
+        LEFT JOIN device_interfaces i ON i.device_id=d.id AND i.scope_id=d.scope_id
+        WHERE (d.mac = ? OR i.mac = ?) AND d.scope_id=?
+        LIMIT 1
         """,
-        (mac_address,)
+        (mac_address, mac_address, network_scope_id(connection, network_id) if network_id is not None else get_scope_id(connection))
     ).fetchone()
 
 
@@ -611,41 +272,16 @@ def identify_device(
 
         device = find_device_by_mac(
             connection,
-            mac_address
+            mac_address,
+            network_id=network_id,
         )
 
         if device is not None:
             return device, "mac"
 
 
-        candidates = get_recent_ip_candidates(
-            connection,
-            network_id,
-            ip_address
-        )
-
-
-        provisional_candidates = [
-            device
-            for device in candidates
-            if (
-                device["mac"] is None
-                and hostnames_match(
-                    device["hostname"],
-                    hostname
-                )
-            )
-        ]
-
-
-        if len(provisional_candidates) == 1:
-
-            return (
-                provisional_candidates[0],
-                "ip_upgrade_to_mac"
-            )
-
-
+        # A newly observed MAC does not prove ownership of a formerly MAC-less IP.
+        # Preserve the old identity and record a candidate instead of merging it.
         return None, "new_mac"
 
 
@@ -721,10 +357,17 @@ def save_discovery_host(
 
 
     if mac_address:
-        mac_address = mac_address.upper()
+        mac_address = normalize_mac(mac_address)
+        if mac_address is None:
+            raise ValueError('Invalid MAC address')
+    scope_id = network_scope_id(connection, network_id)
 
 
-    with connection:
+    with atomic(connection):
+
+        local_key = host.get('local_identity_key')
+        anchor = connection.execute('SELECT d.* FROM devices d JOIN local_identity_keys k ON k.device_id=d.id WHERE k.scope_id=? AND k.identity_key=?',
+                                    (scope_id,local_key)).fetchone() if local_key else None
 
         device, match_method = identify_device(
             connection,
@@ -733,6 +376,10 @@ def save_discovery_host(
             mac_address,
             hostname
         )
+        if anchor is not None:
+            if device is not None and device['id'] != anchor['id']:
+                raise ValueError('Local identity conflicts with a known MAC identity')
+            device, match_method = anchor, 'local_identity'
 
 
         if device is None:
@@ -747,14 +394,16 @@ def save_discovery_host(
             cursor = connection.execute(
                 """
                 INSERT INTO devices (
+                    scope_id,
                     mac,
                     vendor,
                     hostname,
                     identity_status
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
+                    scope_id,
                     mac_address,
                     vendor,
                     hostname,
@@ -837,6 +486,23 @@ def save_discovery_host(
             )
 
 
+        if mac_address:
+            connection.execute("""INSERT INTO device_interfaces(scope_id,device_id,mac,source)
+                VALUES(?,?,?,?) ON CONFLICT(scope_id,mac) DO UPDATE SET last_seen=CURRENT_TIMESTAMP""",
+                (scope_id,device_id,mac_address,'local_interface' if local_key else 'nmap'))
+        if local_key:
+            connection.execute('INSERT OR IGNORE INTO local_identity_keys(scope_id,identity_key,device_id) VALUES(?,?,?)',
+                               (scope_id,local_key,device_id))
+        if host.get('local_os_claims'):
+            save_os_claims(connection, network_id, scan_run_id, device_id, host['local_os_claims'])
+        if match_method in {'new_provisional','new_mac'} and ip_address:
+            candidates = connection.execute('SELECT DISTINCT d.id,d.mac,d.hostname FROM devices d JOIN addresses a ON a.device_id=d.id WHERE a.network_id=? AND a.ip=? AND d.id!=?',
+                                            (network_id,ip_address,device_id)).fetchall()
+            for candidate in candidates:
+                connection.execute("""INSERT OR IGNORE INTO identity_candidates(network_id,device_id,candidate_device_id,scan_run_id,reason,evidence_json)
+                    VALUES(?,?,?,?,?,?)""", (network_id,device_id,candidate['id'],scan_run_id,
+                    'historical_ip_reuse',json.dumps({'ip':ip_address,'observed_mac':mac_address,
+                    'previous_mac':candidate['mac'],'note':'IP alone is not proof of identity'})))
         observation = {
             "ip": ip_address,
             "mac": mac_address,
@@ -844,6 +510,9 @@ def save_discovery_host(
             "hostname": hostname,
             "match_method": match_method
         }
+        observation['identity_confidence'] = 100 if match_method in {'mac','local_identity'} else (
+            95 if mac_address else 40)
+        observation['identity_evidence_status'] = 'confirmed' if mac_address else 'suspected'
 
 
         connection.execute(
@@ -883,7 +552,9 @@ def save_port_scan(
     connection,
     network_id,
     scan_run_id,
-    host
+    host,
+    source="nmap",
+    observation_type="tcp_port_scan",
 ):
     """
     Speichert einen erfolgreichen TCP-Portscan.
@@ -894,7 +565,7 @@ def save_port_scan(
     ports = host.get("ports", [])
 
 
-    with connection:
+    with atomic(connection):
 
         if device_id is not None:
 
@@ -920,9 +591,9 @@ def save_port_scan(
                     )
                     DO UPDATE SET
                         state = excluded.state,
-                        service = excluded.service,
-                        product = excluded.product,
-                        version = excluded.version,
+                        service = COALESCE(NULLIF(excluded.service, ''), ports.service),
+                        product = COALESCE(NULLIF(excluded.product, ''), ports.product),
+                        version = COALESCE(NULLIF(excluded.version, ''), ports.version),
                         last_seen = CURRENT_TIMESTAMP
                     """,
                     (
@@ -953,17 +624,128 @@ def save_port_scan(
                 network_id,
                 device_id,
                 scan_run_id,
-                "tcp_port_scan",
-                "nmap",
+                observation_type,
+                source,
                 json.dumps(
                     {
                         "ip": ip_address,
-                        "ports": ports
+                        "ports": ports,
+                        "scan_metadata": host.get("scan_metadata", {}),
                     },
                     ensure_ascii=False
                 )
             )
         )
+        if device_id is not None:
+            update_port_inventory(connection, network_id, scan_run_id, host, source)
+            save_os_claims(connection, network_id, scan_run_id, device_id,
+                           infer_os_claims(ports=ports))
+
+
+def update_port_inventory(connection, network_id, scan_run_id, host, source):
+    device_id = host["device_id"]
+    ports = host.get("ports") or []
+    seen = {(p["protocol"], p["port"]) for p in ports}
+    for port in ports:
+        service_known = any(port.get(k) for k in ("product", "version", "extrainfo", "ostype", "cpe"))
+        columns = ("state", "service", "product", "version", "extrainfo", "ostype",
+                   "devicetype", "tunnel", "method", "conf")
+        assignments = ", ".join(f"{col}=COALESCE(NULLIF(excluded.{col}, ''), port_inventory.{col})"
+                                for col in columns[1:])
+        connection.execute(f"""
+            INSERT INTO port_inventory(network_id,device_id,protocol,port,{','.join(columns)},
+                cpe_json,metadata_json,service_observed_at,source,scan_run_id)
+            VALUES(?,?,?,?,{','.join('?' for _ in columns)},?,?,
+                   CASE WHEN ? THEN CURRENT_TIMESTAMP END,?,?)
+            ON CONFLICT(network_id,device_id,protocol,port) DO UPDATE SET
+                state=excluded.state, {assignments},
+                cpe_json=CASE WHEN excluded.cpe_json != '[]' THEN excluded.cpe_json ELSE port_inventory.cpe_json END,
+                metadata_json=CASE WHEN ? THEN excluded.metadata_json ELSE port_inventory.metadata_json END,
+                service_observed_at=COALESCE(excluded.service_observed_at,port_inventory.service_observed_at),
+                last_seen=CURRENT_TIMESTAMP,
+                source=CASE WHEN ? THEN excluded.source ELSE port_inventory.source END,
+                scan_run_id=excluded.scan_run_id
+        """, (network_id,device_id,port['protocol'],port['port'],
+              *(port.get(col) for col in columns), json.dumps(port.get('cpe') or []),
+              json.dumps(port.get('service_metadata') or {}), service_known,source,scan_run_id,
+              service_known,service_known))
+    for row in connection.execute("SELECT protocol,port FROM port_inventory WHERE network_id=? AND device_id=? AND state='open'",
+                                  (network_id,device_id)).fetchall():
+        key = (row['protocol'], row['port'])
+        if key not in seen and covered_port(host.get('scan_metadata') or {}, *key):
+            connection.execute("UPDATE port_inventory SET state='not_open', scan_run_id=? WHERE network_id=? AND device_id=? AND protocol=? AND port=?",
+                               (scan_run_id,network_id,device_id,*key))
+
+
+def get_port_inventory(connection, network_id, device_id):
+    rows = connection.execute("SELECT * FROM port_inventory WHERE network_id=? AND device_id=? ORDER BY protocol,port",
+                              (network_id,device_id)).fetchall()
+    result = []
+    for row in rows:
+        port = dict(row)
+        port['cpe'] = json.loads(port.pop('cpe_json'))
+        port['service_metadata'] = json.loads(port.pop('metadata_json'))
+        result.append(port)
+    return result
+
+
+def save_os_claims(connection, network_id, scan_run_id, device_id, claims):
+    for claim in claims:
+        evidence = json.dumps(claim['evidence'], ensure_ascii=False, sort_keys=True)
+        existing = connection.execute("""SELECT 1 FROM os_claims WHERE network_id=? AND device_id=?
+            AND scan_run_id IS ? AND kind=? AND value=? AND source=? AND evidence_json=?""",
+            (network_id,device_id,scan_run_id,claim['kind'],claim['value'],claim['source'],evidence)).fetchone()
+        if existing:
+            continue
+        connection.execute("""INSERT INTO os_claims(network_id,device_id,scan_run_id,kind,value,source,status,confidence,evidence_json)
+            VALUES(?,?,?,?,?,?,?,?,?)""", (network_id,device_id,scan_run_id,claim['kind'],claim['value'],
+            claim['source'],claim['status'],claim['confidence'],evidence))
+
+
+def get_os_claims(connection, network_id, device_id):
+    return get_os_claims_for_devices(connection, [(network_id,device_id)]).get((network_id,device_id), [])
+
+
+def get_os_claims_for_devices(connection, pairs):
+    """Fetch latest distinct evidence for a page in bounded batches, not N queries."""
+    pairs = list(dict.fromkeys(pairs))
+    result = {pair:[] for pair in pairs}
+    for offset in range(0,len(pairs),400):
+        batch = pairs[offset:offset+400]
+        placeholders = ','.join('(?,?)' for _ in batch)
+        rows = connection.execute(f"""WITH ranked AS (
+            SELECT *,ROW_NUMBER() OVER (
+                PARTITION BY network_id,device_id,kind,value,source,status,evidence_json
+                ORDER BY observed_at DESC,id DESC) AS position
+            FROM os_claims WHERE (network_id,device_id) IN (VALUES {placeholders})
+        ) SELECT * FROM ranked WHERE position=1 ORDER BY observed_at DESC,id DESC""",
+            tuple(value for pair in batch for value in pair))
+        for row in rows:
+            group = result[(row['network_id'],row['device_id'])]
+            if len(group) >= 1000:
+                continue
+            claim = dict(row)
+            claim.pop('position')
+            try:
+                claim['evidence'] = json.loads(row['evidence_json'])
+            except (ValueError,TypeError):
+                claim['evidence'] = {'raw':row['evidence_json'], 'parse_error':True}
+            group.append(claim)
+    return result
+
+
+def get_os_history(connection, network_id, device_id):
+    rows = connection.execute("""SELECT id,data_json,observed_at FROM observations WHERE network_id=? AND device_id=?
+        AND observation_type='os_detection' ORDER BY observed_at DESC,id DESC LIMIT 200""", (network_id,device_id)).fetchall()
+    history = []
+    for row in rows:
+        try:
+            os_result = json.loads(row['data_json'] or '{}').get('os')
+            if os_result and os_result.get('name'):
+                history.append(dict(os_result, id=row['id'], observed_at=row['observed_at']))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return history
 
 
 # ==========================================================
@@ -984,8 +766,11 @@ def save_os_information(
     ip_address = host.get("ip")
     os_info = host.get("os")
 
+    if not os_info or not str(os_info.get("name") or "").strip():
+        return
 
-    with connection:
+
+    with atomic(connection):
 
         if (
             device_id is not None
@@ -1038,6 +823,9 @@ def save_os_information(
                 )
             )
         )
+        if device_id is not None:
+            save_os_claims(connection, network_id, scan_run_id, device_id,
+                           infer_os_claims(os_info, os_classes=host.get('os_classes') or []))
 
 
 # ==========================================================
@@ -1072,6 +860,7 @@ def start_scan_run(
     connection.commit()
 
 
+    event('scan_started', scan_run_id=cursor.lastrowid, network_id=network_id, scan_type=scan_type)
     return cursor.lastrowid
 
 
@@ -1116,6 +905,8 @@ def finish_scan_run(
 
 
     connection.commit()
+    event('scan_finished', scan_run_id=scan_run_id, status=status,
+          hosts_processed=hosts_processed, hosts_failed=hosts_failed)
 
 
 def abort_scan_run(
@@ -1169,6 +960,7 @@ def fail_scan_run(
 
 
     connection.commit()
+    event('scan_failed', scan_run_id=scan_run_id, error_type=type(error_message).__name__)
 
 
 def recover_interrupted_scan_runs(
@@ -1295,7 +1087,8 @@ def get_previous_completed_discovery_run(
 def get_last_discovery_observation_before(
     connection,
     device_id,
-    scan_run_id
+    scan_run_id,
+    network_id=None
 ):
     """
     Liefert die letzte Discovery-Beobachtung eines
@@ -1314,6 +1107,7 @@ def get_last_discovery_observation_before(
              observations.scan_run_id
 
         WHERE observations.device_id = ?
+          AND (? IS NULL OR observations.network_id = ?)
 
           AND observations.observation_type =
               'host_discovery'
@@ -1336,6 +1130,7 @@ def get_last_discovery_observation_before(
         """,
         (
             device_id,
+            network_id, network_id,
             scan_run_id
         )
     ).fetchone()
@@ -1584,6 +1379,16 @@ def detect_discovery_changes(
         scan_run_id
     )
 
+    run = connection.execute('SELECT status, hosts_failed FROM scan_runs WHERE id=? AND network_id=?',
+                             (scan_run_id, network_id)).fetchone()
+    if run is None or run['status'] not in {'completed', 'completed_with_errors'}:
+        raise ValueError('Discovery comparison requires a finished run in this network')
+    allow_missing = not run['hosts_failed']
+    prior_comparison = connection.execute("SELECT data_json FROM observations WHERE scan_run_id=? AND observation_type='discovery_comparison'",
+                                          (scan_run_id,)).fetchone()
+    if prior_comparison:
+        return json.loads(prior_comparison['data_json'])
+
 
     previous_run = (
         get_previous_completed_discovery_run(
@@ -1598,7 +1403,7 @@ def detect_discovery_changes(
     pending_missing = []
 
 
-    with connection:
+    with atomic(connection):
 
         presence_states = get_presence_states(
             connection,
@@ -1618,13 +1423,16 @@ def detect_discovery_changes(
                 )
 
 
-                return {
+                result = {
                     "baseline": True,
                     "previous_scan_run_id": None,
                     "current_scan_run_id": scan_run_id,
                     "changes": [],
                     "pending_missing": []
                 }
+                connection.execute("INSERT INTO observations(network_id,scan_run_id,observation_type,source,data_json) VALUES(?,?,'discovery_comparison','inventory',?)",
+                                   (network_id,scan_run_id,json.dumps(result,ensure_ascii=False)))
+                return result
 
 
             previous_scan_run_id = (
@@ -1685,7 +1493,7 @@ def detect_discovery_changes(
                 get_last_discovery_observation_before(
                     connection,
                     device_id,
-                    scan_run_id
+                    scan_run_id, network_id=network_id
                 )
             )
 
@@ -1779,6 +1587,9 @@ def detect_discovery_changes(
             presence_states.items()
         ):
 
+            if not allow_missing:
+                continue
+
             if device_id in current_ids:
                 continue
 
@@ -1799,7 +1610,7 @@ def detect_discovery_changes(
                 get_last_discovery_observation_before(
                     connection,
                     device_id,
-                    scan_run_id
+                    scan_run_id, network_id=network_id
                 )
             )
 
@@ -1870,6 +1681,13 @@ def detect_discovery_changes(
             )
 
 
+        result = {
+            'baseline':False, 'previous_scan_run_id':previous_scan_run_id,
+            'current_scan_run_id':scan_run_id, 'changes':changes, 'pending_missing':pending_missing,
+        }
+        connection.execute("INSERT INTO observations(network_id,scan_run_id,observation_type,source,data_json) VALUES(?,?,'discovery_comparison','inventory',?)",
+                           (network_id,scan_run_id,json.dumps(result,ensure_ascii=False)))
+
     return {
         "baseline": False,
         "previous_scan_run_id":
@@ -1917,7 +1735,8 @@ def get_current_port_scan_observations(
 def get_previous_port_scan_before(
     connection,
     device_id,
-    scan_run_id
+    scan_run_id,
+    network_id=None
 ):
     """
     Liefert den letzten erfolgreichen Portscan
@@ -1937,6 +1756,7 @@ def get_previous_port_scan_before(
              observations.scan_run_id
 
         WHERE observations.device_id = ?
+          AND (? IS NULL OR observations.network_id = ?)
 
           AND observations.observation_type =
               'tcp_port_scan'
@@ -1958,6 +1778,7 @@ def get_previous_port_scan_before(
         """,
         (
             device_id,
+            network_id, network_id,
             scan_run_id
         )
     ).fetchone()
@@ -2005,6 +1826,9 @@ def build_port_map(
 
 
     for port in ports:
+
+        if port.get('state') != 'open':
+            continue
 
         protocol = (
             port.get("protocol")
@@ -2084,7 +1908,7 @@ def detect_detail_changes(
     baseline_devices = 0
 
 
-    with connection:
+    with atomic(connection):
 
         # Falls die Funktion für denselben Run erneut
         # ausgeführt wird, keine Duplikate erzeugen.
@@ -2097,6 +1921,7 @@ def detect_detail_changes(
               AND change_type IN (
                   'PORT_OPENED',
                   'PORT_CLOSED',
+                  'PORT_NOT_OPEN',
                   'SERVICE_CHANGED'
               )
             """,
@@ -2130,7 +1955,7 @@ def detect_detail_changes(
                 get_previous_port_scan_before(
                     connection,
                     device_id,
-                    scan_run_id
+                    scan_run_id, network_id=network_id
                 )
             )
 
@@ -2224,6 +2049,9 @@ def detect_detail_changes(
                 old_keys - new_keys
             ):
 
+                if not covered_port(current_data.get('scan_metadata') or {}, *key):
+                    continue
+
                 old_port = old_ports[
                     key
                 ]
@@ -2235,7 +2063,7 @@ def detect_detail_changes(
                         network_id,
                         device_id,
                         scan_run_id,
-                        "PORT_CLOSED",
+                        "PORT_NOT_OPEN",
 
                         old_value={
                             "ip": old_ip,
@@ -2264,15 +2092,8 @@ def detect_detail_changes(
                 ]
 
 
-                if (
-                    service_signature(
-                        old_port
-                    )
-                    !=
-                    service_signature(
-                        new_port
-                    )
-                ):
+                if any(new_port.get(field) and new_port.get(field) != old_port.get(field)
+                       for field in ('service', 'product', 'version')):
 
                     changes.append(
                         save_change(
@@ -2309,25 +2130,19 @@ def detect_detail_changes(
 
 def get_inventory(
     connection,
-    device_id=None
+    device_id=None,
+    network_id=None,
 ):
     """
     Liest den aktuellen bekannten Gerätestand aus SQLite.
     """
 
-    where_clause = ""
-    parameters = ()
+    where_clause = "WHERE (:device_id IS NULL OR devices.id=:device_id) AND (:network_id IS NULL OR EXISTS (SELECT 1 FROM addresses a WHERE a.device_id=devices.id AND a.network_id=:network_id))"
+    parameters = {"device_id": device_id, "network_id": network_id}
+    where_clause += ' AND devices.scope_id=:scope_id'
+    parameters['scope_id'] = network_scope_id(connection,network_id) if network_id is not None else get_scope_id(connection)
 
 
-    if device_id is not None:
-
-        where_clause = (
-            "WHERE devices.id = ?"
-        )
-
-        parameters = (
-            device_id,
-        )
 
 
     rows = connection.execute(
@@ -2348,6 +2163,7 @@ def get_inventory(
 
                 WHERE addresses.device_id =
                       devices.id
+                  AND (:network_id IS NULL OR addresses.network_id=:network_id)
 
                 ORDER BY
                     addresses.last_seen DESC,
@@ -2367,6 +2183,7 @@ def get_inventory(
 
                   AND observations.observation_type =
                       'tcp_port_scan'
+                  AND (:network_id IS NULL OR observations.network_id=:network_id)
 
                 ORDER BY
                     observations.observed_at DESC,
@@ -2386,6 +2203,7 @@ def get_inventory(
 
                   AND observations.observation_type =
                       'tcp_port_scan'
+                  AND (:network_id IS NULL OR observations.network_id=:network_id)
 
                 ORDER BY
                     observations.observed_at DESC,
@@ -2405,6 +2223,7 @@ def get_inventory(
 
                   AND observations.observation_type =
                       'os_detection'
+                  AND (:network_id IS NULL OR observations.network_id=:network_id)
 
                 ORDER BY
                     observations.observed_at DESC,
@@ -2424,6 +2243,7 @@ def get_inventory(
 
                   AND observations.observation_type =
                       'os_detection'
+                  AND (:network_id IS NULL OR observations.network_id=:network_id)
 
                 ORDER BY
                     observations.observed_at DESC,
@@ -2502,6 +2322,13 @@ def get_inventory(
                 device["os"] = None
 
 
+        if network_id is not None:
+            device['ports'] = [p for p in get_port_inventory(connection, network_id, device['id']) if p['state'] == 'open']
+            history = get_os_history(connection, network_id, device['id'])
+            if history:
+                device['os'] = select_os(history)
+            device['os_summary'] = summarize_claims(get_os_claims(connection, network_id, device['id']))
+        device['mac_analysis'] = analyze_mac(device.get('mac'))
         inventory.append(
             device
         )

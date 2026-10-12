@@ -1,6 +1,7 @@
 import csv
 from functools import lru_cache
 from pathlib import Path
+from mac_analysis import normalize_mac as canonical_mac, analyze_mac
 
 
 IEEE_DATA_DIR = Path("/var/lib/ieee-data")
@@ -19,20 +20,8 @@ def normalize_mac(mac_address):
     und wandelt sie in Großbuchstaben um.
     """
 
-    if not mac_address:
-        return None
-
-    normalized = (
-        mac_address
-        .replace(":", "")
-        .replace("-", "")
-        .upper()
-    )
-
-    if len(normalized) != 12:
-        return None
-
-    return normalized
+    normalized = canonical_mac(mac_address)
+    return normalized.replace(":", "") if normalized else None
 
 
 @lru_cache(maxsize=1)
@@ -88,6 +77,10 @@ def get_vendor_from_mac(mac_address):
     """
 
     normalized_mac = normalize_mac(mac_address)
+
+    facts = analyze_mac(mac_address)
+    if not facts.get("universally_administered") or not facts.get("unicast"):
+        return None
 
     if normalized_mac is None:
         return None

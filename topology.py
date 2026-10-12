@@ -2,14 +2,34 @@
 
 import argparse
 import ipaddress
+from transactions import atomic
 import json
 import re
 import subprocess
 import sys
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from database import get_connection, init_database
+from runtime_lock import inventory_lock, coordinated_entry
+
+_network_context = ContextVar('topology_network', default=None)
+
+
+def scoped_snapshot(function):
+    @wraps(function)
+    def wrapped(connection, snapshot_id, *args, **kwargs):
+        row = connection.execute('SELECT network_id FROM topology_snapshots WHERE id=?', (snapshot_id,)).fetchone()
+        if row is None:
+            raise ValueError('Unknown topology snapshot')
+        token = _network_context.set(row['network_id'])
+        try:
+            return function(connection, snapshot_id, *args, **kwargs)
+        finally:
+            _network_context.reset(token)
+    return wrapped
 
 
 ROUTEROS_DATASETS = {
@@ -63,7 +83,8 @@ def run_json_command(command: list[str]) -> Any:
 def normalize_mac(mac: str | None) -> str | None:
     if not mac:
         return None
-    return mac.strip().upper().replace("-", ":")
+    from mac_analysis import normalize_mac as canonical_mac
+    return canonical_mac(mac)
 
 
 def clean_text(value: Any) -> str | None:
@@ -119,15 +140,7 @@ def print_header(title: str) -> None:
     print("=" * 80)
 
 
-def ensure_column(connection, table: str, column: str, definition: str) -> None:
-    columns = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table})")
-    }
-    if column not in columns:
-        connection.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        )
+from schema import ensure_column
 
 
 # -----------------------------------------------------------------------------
@@ -135,277 +148,10 @@ def ensure_column(connection, table: str, column: str, definition: str) -> None:
 # -----------------------------------------------------------------------------
 
 
-def init_topology_database(connection) -> None:
-    """
-    Erweitert die vorhandene NetChecker-Datenbank um die Topologie-Tabellen.
-
-    Die alten Phase-3-Tabellen bleiben erhalten. Zusaetzlich speichern wir
-    Rohdaten/Evidenz, Segmente, Interfaces, Beziehungen, Policies und
-    Identitaets-Kandidaten.
-    """
-
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS topology_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            network_id INTEGER NOT NULL,
-            interface TEXT NOT NULL,
-            gateway TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(network_id) REFERENCES networks(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_routes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            destination TEXT,
-            gateway TEXT,
-            interface TEXT,
-            protocol TEXT,
-            scope TEXT,
-            metric INTEGER,
-            preferred_source TEXT,
-            raw_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_neighbors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            device_id INTEGER,
-            ip TEXT,
-            mac TEXT,
-            interface TEXT,
-            state TEXT,
-            raw_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_routeros_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            router_device_id INTEGER,
-            router_ip TEXT NOT NULL,
-            dataset TEXT NOT NULL,
-            item_index INTEGER NOT NULL,
-            raw_json TEXT NOT NULL,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(router_device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_segments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            segment_name TEXT,
-            cidr TEXT,
-            segment_type TEXT NOT NULL,
-            bridge_name TEXT,
-            gateway_ip TEXT,
-            router_device_id INTEGER,
-            router_ip TEXT,
-            source TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            raw_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(router_device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_interfaces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            device_id INTEGER,
-            owner_ip TEXT,
-            interface_name TEXT NOT NULL,
-            interface_type TEXT,
-            bridge_name TEXT,
-            mac TEXT,
-            state TEXT,
-            source TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            raw_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            source_device_id INTEGER,
-            source_ip TEXT,
-            source_interface TEXT,
-            target_device_id INTEGER,
-            target_ip TEXT,
-            target_mac TEXT,
-            target_interface TEXT,
-            relation TEXT NOT NULL,
-            evidence_source TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            evidence_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(source_device_id) REFERENCES devices(id),
-            FOREIGN KEY(target_device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_policies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            router_device_id INTEGER,
-            router_ip TEXT,
-            policy_type TEXT NOT NULL,
-            rule_order INTEGER,
-            chain_name TEXT,
-            action TEXT,
-            src_cidr TEXT,
-            dst_cidr TEXT,
-            in_interface TEXT,
-            out_interface TEXT,
-            comment TEXT,
-            source TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            raw_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(router_device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_endpoint_interfaces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            device_id INTEGER,
-            hostname TEXT,
-            identity_hint TEXT,
-            ip TEXT,
-            mac TEXT,
-            network_cidr TEXT,
-            bridge_name TEXT,
-            attachment_device_id INTEGER,
-            attachment_ip TEXT,
-            attachment_interface TEXT,
-            state TEXT,
-            source TEXT NOT NULL,
-            confidence INTEGER NOT NULL,
-            evidence_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(device_id) REFERENCES devices(id),
-            FOREIGN KEY(attachment_device_id) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_identity_candidates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id INTEGER NOT NULL,
-            hostname TEXT NOT NULL,
-            device_id_a INTEGER,
-            ip_a TEXT,
-            mac_a TEXT,
-            device_id_b INTEGER,
-            ip_b TEXT,
-            mac_b TEXT,
-            confidence INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'candidate',
-            evidence_json TEXT,
-            FOREIGN KEY(snapshot_id) REFERENCES topology_snapshots(id),
-            FOREIGN KEY(device_id_a) REFERENCES devices(id),
-            FOREIGN KEY(device_id_b) REFERENCES devices(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_device_hints (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id INTEGER NOT NULL,
-            network_id INTEGER NOT NULL,
-            category TEXT NOT NULL,
-            subtype TEXT,
-            manufacturer TEXT,
-            model TEXT,
-            confidence INTEGER NOT NULL,
-            source TEXT NOT NULL,
-            source_device_id INTEGER,
-            source_ip TEXT,
-            observed_ip TEXT,
-            observed_mac TEXT,
-            identity TEXT,
-            platform TEXT,
-            system_description TEXT,
-            evidence_json TEXT,
-            first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(device_id) REFERENCES devices(id),
-            FOREIGN KEY(network_id) REFERENCES networks(id),
-            FOREIGN KEY(source_device_id) REFERENCES devices(id),
-            UNIQUE(device_id, network_id, source)
-        );
-
-        CREATE TABLE IF NOT EXISTS topology_classification_reconciliations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id INTEGER NOT NULL,
-            network_id INTEGER NOT NULL,
-            hint_id INTEGER,
-            old_category TEXT,
-            old_subtype TEXT,
-            old_confidence INTEGER,
-            new_category TEXT NOT NULL,
-            new_subtype TEXT,
-            new_confidence INTEGER NOT NULL,
-            reason TEXT NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(device_id) REFERENCES devices(id),
-            FOREIGN KEY(network_id) REFERENCES networks(id),
-            FOREIGN KEY(hint_id) REFERENCES topology_device_hints(id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_topology_routeros_snapshot
-            ON topology_routeros_records(snapshot_id, dataset);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_segments_snapshot
-            ON topology_segments(snapshot_id);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_interfaces_snapshot
-            ON topology_interfaces(snapshot_id);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_links_snapshot
-            ON topology_links(snapshot_id, relation);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_policies_snapshot
-            ON topology_policies(snapshot_id);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_endpoint_snapshot
-            ON topology_endpoint_interfaces(snapshot_id);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_endpoint_mac
-            ON topology_endpoint_interfaces(mac);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_endpoint_ip
-            ON topology_endpoint_interfaces(ip);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_identity_snapshot
-            ON topology_identity_candidates(snapshot_id);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_device_hints_device
-            ON topology_device_hints(device_id, network_id, confidence);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_device_hints_seen
-            ON topology_device_hints(last_seen);
-
-        CREATE INDEX IF NOT EXISTS idx_topology_reconcile_device
-            ON topology_classification_reconciliations(device_id, network_id, applied_at);
-        """
-    )
-
-    # Migration fuer bereits existierende Phase-3-Datenbanken.
-    ensure_column(connection, "topology_snapshots", "status", "TEXT NOT NULL DEFAULT 'running'")
-    ensure_column(connection, "topology_snapshots", "completed_at", "TEXT")
-    ensure_column(connection, "topology_snapshots", "error_message", "TEXT")
-    ensure_column(connection, "topology_snapshots", "source_summary_json", "TEXT")
-    ensure_column(connection, "topology_routes", "route_type", "TEXT")
-    ensure_column(connection, "topology_routes", "evidence_source", "TEXT")
-    ensure_column(connection, "topology_neighbors", "evidence_source", "TEXT")
-    ensure_column(
-        connection,
-        "topology_identity_candidates",
-        "candidate_type",
-        "TEXT NOT NULL DEFAULT 'same_hostname_different_mac'",
-    )
-
-    connection.commit()
+def init_topology_database(connection):
+    """Compatibility entry point for the central schema coordinator."""
+    from schema import initialize_database
+    initialize_database(connection)
 
 
 # -----------------------------------------------------------------------------
@@ -502,73 +248,51 @@ def route_label(route_type: str) -> str:
 # -----------------------------------------------------------------------------
 
 
-def resolve_network_id(connection, cidr: str, interface: str, gateway: str | None) -> int:
-    row = connection.execute(
-        """
-        SELECT id
-        FROM networks
-        WHERE cidr = ? AND interface = ?
-        ORDER BY last_seen DESC
-        LIMIT 1
-        """,
-        (cidr, interface),
-    ).fetchone()
 
-    if row:
-        connection.execute(
-            """
-            UPDATE networks
-            SET gateway = ?, last_seen = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (gateway, row["id"]),
-        )
-        connection.commit()
-        return int(row["id"])
-
-    cursor = connection.execute(
-        """
-        INSERT INTO networks (cidr, interface, gateway)
-        VALUES (?, ?, ?)
-        """,
-        (cidr, interface, gateway),
-    )
-    connection.commit()
-    return int(cursor.lastrowid)
+def resolve_network_id(connection, cidr, interface, gateway):
+    from database import save_network
+    return save_network(connection, cidr, interface, gateway)
 
 
-def find_device_id_by_mac(connection, mac: str | None) -> int | None:
-    mac = normalize_mac(mac)
-    if not mac:
-        return None
 
-    row = connection.execute(
-        "SELECT id FROM devices WHERE UPPER(mac) = ? LIMIT 1",
-        (mac,),
-    ).fetchone()
-    return int(row["id"]) if row else None
+def find_device_id_by_mac(connection, mac, network_id=None):
+    from database import find_device_by_mac
+    network_id = network_id if network_id is not None else _network_context.get()
+    if network_id is None:
+        raise ValueError('A network is required for topology identity lookup')
+    row = find_device_by_mac(connection, mac, network_id=network_id)
+    return int(row['id']) if row else None
 
 
-def find_device_by_ip(connection, ip: str | None):
+
+def find_device_by_ip(connection, ip, network_id=None, observed_at=None):
+    from database import network_scope_id
     if not ip:
         return None
+    network_id = network_id if network_id is not None else _network_context.get()
+    if network_id is None:
+        raise ValueError('A network is required for topology address lookup')
+    if observed_at is not None:
+        # Resolve against the identity recorded at the observation time, never
+        # against today's address owner during a historical backfill.
+        return connection.execute("""SELECT d.id,d.mac,d.vendor,d.hostname,? AS ip
+            FROM observations o JOIN devices d ON d.id=o.device_id
+            WHERE o.network_id=? AND o.observation_type='host_discovery'
+              AND json_valid(o.data_json) AND json_extract(o.data_json,'$.ip')=?
+              AND o.observed_at<=? ORDER BY o.observed_at DESC,o.id DESC LIMIT 1""",
+            (ip,network_id,ip,observed_at)).fetchone()
+    return connection.execute("""SELECT d.id,d.mac,d.vendor,d.hostname,a.ip
+        FROM addresses a JOIN devices d ON d.id=a.device_id
+        JOIN networks n ON n.id=a.network_id
+        WHERE a.ip=? AND (? IS NULL OR a.network_id=?) AND n.scope_id=?
+        ORDER BY a.last_seen DESC,a.id DESC LIMIT 1""",
+        (ip,network_id,network_id,network_scope_id(connection, network_id))).fetchone()
 
-    return connection.execute(
-        """
-        SELECT d.id, d.mac, d.vendor, d.hostname, a.ip
-        FROM addresses a
-        JOIN devices d ON d.id = a.device_id
-        WHERE a.ip = ?
-        ORDER BY a.last_seen DESC
-        LIMIT 1
-        """,
-        (ip,),
-    ).fetchone()
 
 
-def find_device_id_by_ip(connection, ip: str | None) -> int | None:
-    row = find_device_by_ip(connection, ip)
-    return int(row["id"]) if row else None
+def find_device_id_by_ip(connection, ip, network_id=None, observed_at=None):
+    row = find_device_by_ip(connection, ip, network_id, observed_at)
+    return int(row['id']) if row else None
 
 
 def get_device_row(connection, device_id: int | None):
@@ -912,6 +636,7 @@ def save_local_routes(connection, snapshot_id: int, routes: list[dict[str, Any]]
     connection.commit()
 
 
+@scoped_snapshot
 def save_local_neighbors(connection, snapshot_id: int, neighbors: list[dict[str, Any]]) -> None:
     for neighbor in neighbors:
         ip = neighbor.get("dst")
@@ -996,7 +721,7 @@ def build_routeros_export_command() -> str:
     return "; ".join(parts)
 
 
-def collect_routeros_via_ssh(host: str, user: str) -> dict[str, list[dict[str, Any]]]:
+def collect_routeros_via_ssh(host: str, user: str, *, batch: bool = False) -> dict[str, list[dict[str, Any]]]:
     """
     Liest RouterOS ausschliesslich lesend ueber SSH aus.
 
@@ -1009,11 +734,14 @@ def collect_routeros_via_ssh(host: str, user: str) -> dict[str, list[dict[str, A
     print()
     print(f"RouterOS READ-ONLY: {user}@{host}")
     print("Produktionsschutz aktiv: ausschliesslich print/as-value-Abfragen, keine Konfigurationsbefehle.")
-    print("Falls kein SSH-Key eingerichtet ist, fragt SSH jetzt nach dem Passwort.")
+    if not batch:
+        print("Falls kein SSH-Key eingerichtet ist, fragt SSH jetzt nach dem Passwort.")
 
     result = subprocess.run(
         [
             "ssh",
+            *(["-o", "BatchMode=yes", "-o", "PasswordAuthentication=no",
+               "-o", "KbdInteractiveAuthentication=no"] if batch else []),
             "-o", "ConnectTimeout=8",
             "-o", "ConnectionAttempts=1",
             "-o", "ServerAliveInterval=5",
@@ -1024,6 +752,7 @@ def collect_routeros_via_ssh(host: str, user: str) -> dict[str, list[dict[str, A
         ],
         stdout=subprocess.PIPE,
         text=True,
+        timeout=90,
     )
 
     if result.returncode != 0:
@@ -1367,6 +1096,7 @@ def insert_link(
     )
 
 
+@scoped_snapshot
 def derive_routeros_links(
     connection,
     snapshot_id: int,
@@ -1520,7 +1250,7 @@ def derive_routeros_links(
             target_ip,
             target_mac,
             target_interface,
-            "physical_neighbor",
+            "physical_neighbor" if evidence_source in {"routeros_lldp", "routeros_cdp"} else "discovery_neighbor",
             evidence_source,
             confidence,
             neighbor,
@@ -1711,6 +1441,7 @@ def save_endpoint_interface_observation(
     )
 
 
+@scoped_snapshot
 def derive_routeros_endpoint_interfaces(
     connection,
     snapshot_id: int,
@@ -1889,6 +1620,7 @@ def derive_routeros_policies(
             )
 
 
+@scoped_snapshot
 def derive_identity_candidates(
     connection,
     snapshot_id: int,
@@ -1919,7 +1651,9 @@ def derive_identity_candidates(
         FROM devices d
         WHERE d.hostname IS NOT NULL
           AND TRIM(d.hostname) != ''
+          AND d.scope_id = (SELECT scope_id FROM networks WHERE id=?)
         """
+        , (_network_context.get(),)
     ).fetchall()
 
     for lease in datasets.get("dhcp_lease", []):
@@ -2005,6 +1739,7 @@ def derive_identity_candidates(
             )
 
 
+@scoped_snapshot
 def derive_routeros_topology(
     connection,
     snapshot_id: int,
@@ -2189,6 +1924,9 @@ def _neighbor_is_infrastructure(neighbor: dict[str, Any]) -> bool:
     if enabled_caps & {"bridge", "router", "wlan-ap", "wlanap"}:
         return True
 
+    if enabled and 'station-only' in enabled:
+        return False
+
     infrastructure_words = (
         "switch", "aruba", "instant on", "jl683b", "cisco",
         "ubiquiti", "unifi", "mikrotik", "routeros",
@@ -2218,6 +1956,7 @@ def _neighbor_is_infrastructure(neighbor: dict[str, Any]) -> bool:
 def _device_context_confirms_network_infrastructure(
     connection,
     device_id: int | None,
+    network_id: int,
 ) -> tuple[bool, str | None]:
     """Bestaetigt Infrastruktur nur durch bereits lokal gespeicherte Zusatzsignale.
 
@@ -2258,11 +1997,11 @@ def _device_context_confirms_network_infrastructure(
             f"""
             SELECT category, subtype
             FROM device_classifications
-            WHERE device_id = ?
+            WHERE device_id = ? AND network_id = ?
             {order_clause}
             LIMIT 1
             """,
-            (device_id,),
+            (device_id,network_id),
         ).fetchone()
 
     current_text = ""
@@ -2273,18 +2012,9 @@ def _device_context_confirms_network_infrastructure(
         if classification["category"] in {"network_device", "firewall_router"}:
             return True, "existing_network_classification"
 
-    os_row = connection.execute(
-        """
-        SELECT name
-        FROM os_information
-        WHERE device_id = ?
-        ORDER BY observed_at DESC, id DESC
-        LIMIT 1
-        """,
-        (device_id,),
-    ).fetchone() if connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='os_information'"
-    ).fetchone() else None
+    from database import get_os_history
+    history = get_os_history(connection, network_id, device_id)
+    os_row = history[0] if history else None
 
     os_name = ((clean_text(os_row["name"]) if os_row else "") or "").lower()
     network_words = (
@@ -2340,19 +2070,19 @@ def upsert_topology_device_hint(
         )
         ON CONFLICT(device_id, network_id, source)
         DO UPDATE SET
-            category = excluded.category,
-            subtype = excluded.subtype,
-            manufacturer = COALESCE(excluded.manufacturer, topology_device_hints.manufacturer),
-            model = COALESCE(excluded.model, topology_device_hints.model),
-            confidence = MAX(topology_device_hints.confidence, excluded.confidence),
-            source_device_id = COALESCE(excluded.source_device_id, topology_device_hints.source_device_id),
-            source_ip = COALESCE(excluded.source_ip, topology_device_hints.source_ip),
-            observed_ip = COALESCE(excluded.observed_ip, topology_device_hints.observed_ip),
-            observed_mac = COALESCE(excluded.observed_mac, topology_device_hints.observed_mac),
-            identity = COALESCE(excluded.identity, topology_device_hints.identity),
-            platform = COALESCE(excluded.platform, topology_device_hints.platform),
-            system_description = COALESCE(excluded.system_description, topology_device_hints.system_description),
-            evidence_json = excluded.evidence_json,
+            category = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN excluded.category ELSE topology_device_hints.category END,
+            subtype = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN excluded.subtype ELSE topology_device_hints.subtype END,
+            manufacturer = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.manufacturer, topology_device_hints.manufacturer) ELSE topology_device_hints.manufacturer END,
+            model = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.model, topology_device_hints.model) ELSE topology_device_hints.model END,
+            confidence = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN excluded.confidence ELSE topology_device_hints.confidence END,
+            source_device_id = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.source_device_id, topology_device_hints.source_device_id) ELSE topology_device_hints.source_device_id END,
+            source_ip = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.source_ip, topology_device_hints.source_ip) ELSE topology_device_hints.source_ip END,
+            observed_ip = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.observed_ip, topology_device_hints.observed_ip) ELSE topology_device_hints.observed_ip END,
+            observed_mac = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.observed_mac, topology_device_hints.observed_mac) ELSE topology_device_hints.observed_mac END,
+            identity = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.identity, topology_device_hints.identity) ELSE topology_device_hints.identity END,
+            platform = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.platform, topology_device_hints.platform) ELSE topology_device_hints.platform END,
+            system_description = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN COALESCE(excluded.system_description, topology_device_hints.system_description) ELSE topology_device_hints.system_description END,
+            evidence_json = CASE WHEN excluded.last_seen >= topology_device_hints.last_seen THEN excluded.evidence_json ELSE topology_device_hints.evidence_json END,
             last_seen = CASE
                 WHEN excluded.last_seen > topology_device_hints.last_seen
                     THEN excluded.last_seen
@@ -2386,15 +2116,20 @@ def derive_neighbor_classification_hint(
     # von der Management-MAC abweichen. Deshalb versuchen wir nach einem
     # MAC-Konflikt zusaetzlich die beobachtete Management-IP. Die MACs selbst
     # werden dadurch NICHT fusioniert.
-    device_id = find_device_id(connection, ip=target_ip, mac=target_mac)
+    device_id = find_device_id_by_mac(connection, target_mac, network_id=network_id)
     if device_id is None and target_ip:
-        device_id = find_device_id_by_ip(connection, target_ip)
+        # A chassis MAC can differ from the management MAC, but the IP-based
+        # fallback must use the original network and observation timestamp.
+        device_id = find_device_id_by_ip(connection, target_ip, network_id, observed_at)
     if device_id is None:
+        return False
+    if not connection.execute('SELECT 1 FROM addresses WHERE network_id=? AND device_id=?',
+                              (network_id,device_id)).fetchone():
         return False
 
     direct_infrastructure = _neighbor_is_infrastructure(neighbor)
     corroborated, corroboration_reason = _device_context_confirms_network_infrastructure(
-        connection, device_id
+        connection, device_id, network_id
     )
     if not direct_infrastructure and not corroborated:
         return False
@@ -2538,201 +2273,49 @@ def _neighbor_history_key(
     )
 
 
-def backfill_topology_device_hints_from_history(connection) -> int:
-    """
-    Baut langlebige Klassifikations-Hints aus bereits gespeicherter Topologie auf.
 
-    Es werden drei rein lokale historische Quellen ausgewertet:
-      1. RouterOS-Rohdaten (dataset=neighbor)
-      2. physische Neighbor-Links aus topology_links
-      3. eingebettete Neighbor-Evidenz in topology_endpoint_interfaces
-
-    Dadurch bleibt ein alter LLDP-Treffer nutzbar, selbst wenn eine der
-    Historientabellen in einer frueheren Phase noch unvollstaendig war.
-    Es findet KEINE Netzwerkabfrage statt.
-    """
-    seen: set[tuple[Any, ...]] = set()
-    count = 0
-
-    def process(
-        *,
-        network_id: int,
-        source_device_id: int | None,
-        source_ip: str | None,
-        neighbor: dict[str, Any],
-        observed_at: str | None,
-    ) -> None:
-        nonlocal count
-        key = _neighbor_history_key(network_id, source_ip, neighbor)
-        if key in seen:
-            return
-        seen.add(key)
-        if derive_neighbor_classification_hint(
-            connection,
-            network_id=network_id,
-            source_device_id=source_device_id,
-            source_ip=source_ip,
-            neighbor=neighbor,
-            observed_at=observed_at,
-        ):
-            count += 1
-
-    # 1) Originale RouterOS-Neighbor-Rohdaten.
-    raw_rows = connection.execute(
-        """
-        SELECT
-            r.router_device_id,
-            r.router_ip,
-            r.raw_json,
-            s.network_id,
-            s.created_at
-        FROM topology_routeros_records r
-        JOIN topology_snapshots s ON s.id = r.snapshot_id
-        WHERE r.dataset = 'neighbor'
-        ORDER BY s.created_at, r.item_index
-        """
-    ).fetchall()
-
-    for row in raw_rows:
-        neighbor = _json_object(row["raw_json"])
-        if neighbor is None:
-            continue
-        process(
-            network_id=int(row["network_id"]),
-            source_device_id=(
-                int(row["router_device_id"])
-                if row["router_device_id"] is not None
-                else None
-            ),
-            source_ip=clean_text(row["router_ip"]),
-            neighbor=neighbor,
-            observed_at=clean_text(row["created_at"]),
-        )
-
-    # 2) Bereits abgeleitete physische Neighbor-Links. Deren evidence_json
-    # enthaelt beim RouterOS-Collector den originalen Neighbor-Datensatz.
-    link_rows = connection.execute(
-        """
-        SELECT
-            l.source_device_id,
-            l.source_ip,
-            l.target_ip,
-            l.target_mac,
-            l.evidence_source,
-            l.evidence_json,
-            s.network_id,
-            s.created_at
-        FROM topology_links l
-        JOIN topology_snapshots s ON s.id = l.snapshot_id
-        WHERE l.relation = 'physical_neighbor'
-          AND l.evidence_source IN (
-              'routeros_neighbor_discovery',
-              'routeros_lldp',
-              'routeros_cdp',
-              'routeros_mndp'
-          )
-        ORDER BY s.created_at, l.id
-        """
-    ).fetchall()
-
-    for row in link_rows:
-        neighbor = _json_object(row["evidence_json"])
-        if neighbor is None:
-            neighbor = {}
-        neighbor = dict(neighbor)
-        if not _neighbor_ipv4(neighbor) and row["target_ip"]:
-            neighbor["address4"] = row["target_ip"]
-        if not _neighbor_mac(neighbor) and row["target_mac"]:
-            neighbor["mac-address"] = row["target_mac"]
-        if not _neighbor_discovered_by(neighbor):
-            source_name = clean_text(row["evidence_source"]) or ""
-            if source_name.startswith("routeros_"):
-                neighbor["discovered-by"] = source_name.removeprefix("routeros_").replace("neighbor_discovery", "") or "neighbor"
-        process(
-            network_id=int(row["network_id"]),
-            source_device_id=(
-                int(row["source_device_id"])
-                if row["source_device_id"] is not None
-                else None
-            ),
-            source_ip=clean_text(row["source_ip"]),
-            neighbor=neighbor,
-            observed_at=clean_text(row["created_at"]),
-        )
-
-    # 3) Interface-Sicht. Hier kann evidence_json mehrere Quellen enthalten.
-    endpoint_rows = connection.execute(
-        """
-        SELECT
-            e.attachment_device_id,
-            e.attachment_ip,
-            e.ip AS endpoint_ip,
-            e.mac AS endpoint_mac,
-            e.hostname AS endpoint_hostname,
-            e.evidence_json,
-            s.network_id,
-            s.created_at
-        FROM topology_endpoint_interfaces e
-        JOIN topology_snapshots s ON s.id = e.snapshot_id
-        WHERE e.evidence_json IS NOT NULL
-          AND e.evidence_json LIKE '%routeros_%'
-        ORDER BY s.created_at, e.id
-        """
-    ).fetchall()
-
-    discovery_sources = {
-        "routeros_neighbor_discovery",
-        "routeros_lldp",
-        "routeros_cdp",
-        "routeros_mndp",
+def backfill_topology_device_hints_from_history(connection):
+    """Incremental replay; identical later observations refresh last_seen."""
+    from database import get_scope_id
+    scope_id = get_scope_id(connection)
+    rule_version = 2
+    sources = {
+        'topology_routeros_records': ("r.router_device_id AS owner,r.router_ip AS owner_ip,r.raw_json AS payload", "r.dataset='neighbor'"),
+        'topology_links': ("r.source_device_id AS owner,r.source_ip AS owner_ip,r.evidence_json AS payload", "r.relation='physical_neighbor'"),
+        'topology_endpoint_interfaces': ("r.attachment_device_id AS owner,r.attachment_ip AS owner_ip,r.evidence_json AS payload", "r.evidence_json IS NOT NULL"),
     }
-
-    for row in endpoint_rows:
-        payload = _json_object(row["evidence_json"])
-        if payload is None:
-            continue
-
-        evidence_entries = payload.get("evidence")
-        if not isinstance(evidence_entries, list):
-            continue
-
-        for entry in evidence_entries:
-            if not isinstance(entry, dict):
-                continue
-            if clean_text(entry.get("source")) not in discovery_sources:
-                continue
-            neighbor = entry.get("data")
-            if not isinstance(neighbor, dict):
-                neighbor = {}
-            neighbor = dict(neighbor)
-            if not _neighbor_ipv4(neighbor) and row["endpoint_ip"]:
-                neighbor["address4"] = row["endpoint_ip"]
-            if not _neighbor_mac(neighbor) and row["endpoint_mac"]:
-                neighbor["mac-address"] = row["endpoint_mac"]
-            if not clean_text(_evidence_text(_evidence_field(neighbor, "identity"))) and row["endpoint_hostname"]:
-                neighbor["identity"] = row["endpoint_hostname"]
-            if not _neighbor_discovered_by(neighbor):
-                source_name = clean_text(entry.get("source")) or ""
-                if source_name.startswith("routeros_"):
-                    neighbor["discovered-by"] = source_name.removeprefix("routeros_").replace("neighbor_discovery", "") or "neighbor"
-            process(
-                network_id=int(row["network_id"]),
-                source_device_id=(
-                    int(row["attachment_device_id"])
-                    if row["attachment_device_id"] is not None
-                    else None
-                ),
-                source_ip=clean_text(row["attachment_ip"]),
-                neighbor=neighbor,
-                observed_at=clean_text(row["created_at"]),
-            )
-
+    count = 0
+    for table,(fields,where) in sources.items():
+        progress_key = f'{scope_id}:{table}'
+        previous = connection.execute('SELECT last_id,rule_version FROM topology_history_progress WHERE source_table=?',(progress_key,)).fetchone()
+        last_id = previous['last_id'] if previous and previous['rule_version']==rule_version else 0
+        rows = connection.execute(f"""SELECT r.id,{fields},s.network_id,s.created_at
+            FROM {table} r JOIN topology_snapshots s ON s.id=r.snapshot_id
+            JOIN networks n ON n.id=s.network_id
+            WHERE r.id>? AND {where} AND n.scope_id=? AND s.status IN ('complete','partial') ORDER BY r.id""",(last_id,scope_id)).fetchall()
+        for row in rows:
+            payload = _json_object(row['payload'])
+            neighbors = [payload] if payload else []
+            if table == 'topology_endpoint_interfaces':
+                neighbors = [e.get('data') for e in (payload or {}).get('evidence',[])
+                             if isinstance(e,dict) and e.get('source') in
+                             {'routeros_neighbor_discovery','routeros_lldp','routeros_cdp','routeros_mndp'}]
+            for neighbor in neighbors:
+                if isinstance(neighbor,dict) and derive_neighbor_classification_hint(
+                    connection,network_id=row['network_id'],source_device_id=row['owner'],
+                    source_ip=row['owner_ip'],neighbor=neighbor,observed_at=row['created_at']):
+                    count += 1
+            last_id = row['id']
+        connection.execute("""INSERT INTO topology_history_progress(source_table,last_id,rule_version) VALUES(?,?,?)
+            ON CONFLICT(source_table) DO UPDATE SET last_id=excluded.last_id,rule_version=excluded.rule_version""",
+            (progress_key,last_id,rule_version))
     connection.commit()
     return count
 
 
 def analyze_routeros_neighbor_history(connection) -> dict[str, Any]:
     """Erklaert, warum historische RouterOS-Neighbor-Daten nutzbar oder unbrauchbar sind."""
+    from database import get_scope_id
     stats: dict[str, Any] = {
         "total": 0,
         "parseable": 0,
@@ -2748,9 +2331,10 @@ def analyze_routeros_neighbor_history(connection) -> dict[str, Any]:
         SELECT r.raw_json, r.router_ip, s.network_id
         FROM topology_routeros_records r
         JOIN topology_snapshots s ON s.id = r.snapshot_id
-        WHERE r.dataset = 'neighbor'
+        JOIN networks n ON n.id=s.network_id
+        WHERE r.dataset = 'neighbor' AND n.scope_id=?
         ORDER BY s.created_at DESC, r.item_index
-        """
+        """, (get_scope_id(connection),)
     ).fetchall()
 
     stats["total"] = len(rows)
@@ -2766,9 +2350,9 @@ def analyze_routeros_neighbor_history(connection) -> dict[str, Any]:
         if target_ip:
             stats["with_ip"] += 1
 
-        device_id = find_device_id(connection, ip=target_ip, mac=target_mac)
+        device_id = find_device_id_by_mac(connection, target_mac, row['network_id'])
         if device_id is None and target_ip:
-            device_id = find_device_id_by_ip(connection, target_ip)
+            device_id = find_device_id_by_ip(connection, target_ip, row['network_id'])
         if device_id is not None:
             stats["mapped_device"] += 1
 
@@ -2777,7 +2361,7 @@ def analyze_routeros_neighbor_history(connection) -> dict[str, Any]:
             stats["direct_infrastructure"] += 1
 
         corroborated, reason = _device_context_confirms_network_infrastructure(
-            connection, device_id
+            connection, device_id, row['network_id']
         )
         if corroborated:
             stats["corroborated_infrastructure"] += 1
@@ -2884,117 +2468,39 @@ def _classification_should_accept_hint(current, hint) -> bool:
     return False
 
 
-def reconcile_topology_classification_hints(
-    connection,
-    network_id: int | None = None,
-    *,
-    verbose: bool = True,
-) -> dict[str, int]:
-    """
-    Legt starke Topologie-Evidenz als Overlay auf die bestehende Klassifikation.
 
-    Die Funktion erzeugt keine neuen Netzwerkabfragen. Sie arbeitet nur auf
-    SQLite und kann deshalb nach jedem normalen Klassifikationslauf erneut
-    angewendet werden.
-    """
-    if not connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_classifications'"
-    ).fetchone():
-        return {"hints": 0, "applied": 0}
-
-    columns = table_columns(connection, "device_classifications")
-    required = {"device_id", "network_id", "category", "subtype", "confidence"}
-    if not required.issubset(columns):
-        return {"hints": 0, "applied": 0}
-
-    params: tuple[Any, ...] = ()
-    network_where = ""
-    if network_id is not None:
-        network_where = "AND h.network_id = ?"
-        params = (network_id,)
-
-    hints = connection.execute(
-        f"""
-        SELECT h.*
-        FROM topology_device_hints h
-        WHERE h.confidence >= 90
-          {network_where}
-          AND h.id = (
-              SELECT h2.id
-              FROM topology_device_hints h2
-              WHERE h2.device_id = h.device_id
-                AND h2.network_id = h.network_id
-              ORDER BY h2.confidence DESC, h2.last_seen DESC, h2.id DESC
-              LIMIT 1
-          )
-        ORDER BY h.network_id, h.device_id
-        """,
-        params,
-    ).fetchall()
-
-    applied = 0
-    for hint in hints:
-        current = connection.execute(
-            """
-            SELECT rowid AS classification_rowid, *
-            FROM device_classifications
-            WHERE device_id = ? AND network_id = ?
-            LIMIT 1
-            """,
-            (hint["device_id"], hint["network_id"]),
-        ).fetchone()
-        if current is None or not _classification_should_accept_hint(current, hint):
+def reconcile_topology_classification_hints(connection, network_id=None, *, verbose=True):
+    from classification_store import save_classification
+    from classification_evidence import apply_topology_hint
+    from database import get_scope_id, network_scope_id
+    scope_id = network_scope_id(connection,network_id) if network_id is not None else get_scope_id(connection)
+    params = (network_id,network_id,scope_id)
+    rows = connection.execute("""SELECT * FROM device_classifications
+        WHERE (? IS NULL OR network_id=?) AND network_id IN (SELECT id FROM networks WHERE scope_id=?)""", params).fetchall()
+    hints = applied = 0
+    for row in rows:
+        old = dict(row)
+        old['evidence'] = json.loads(old.pop('evidence_json'))
+        result = apply_topology_hint(connection,row['network_id'],row['device_id'],old)
+        if result is old:
             continue
-
-        assignments = ["category = ?", "subtype = ?", "confidence = ?"]
-        values: list[Any] = [hint["category"], hint["subtype"], hint["confidence"]]
-
-        for timestamp_column in ("updated_at", "classified_at", "last_updated"):
-            if timestamp_column in columns:
-                assignments.append(f"{timestamp_column} = CURRENT_TIMESTAMP")
-                break
-
-        values.append(current["classification_rowid"])
-        connection.execute(
-            f"UPDATE device_classifications SET {', '.join(assignments)} WHERE rowid = ?",
-            values,
-        )
-
-        connection.execute(
-            """
-            INSERT INTO topology_classification_reconciliations (
-                device_id, network_id, hint_id,
-                old_category, old_subtype, old_confidence,
-                new_category, new_subtype, new_confidence, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                hint["device_id"], hint["network_id"], hint["id"],
-                current["category"], current["subtype"], current["confidence"],
-                hint["category"], hint["subtype"], hint["confidence"],
-                f"starke Topologie-Evidenz via {hint['source']}",
-            ),
-        )
+        hints += 1
+        with atomic(connection):
+            # save_classification owns the complete classification/history
+            # transaction; reconciliation is a separate audit of the overlay.
+            changed = save_classification(connection,row['network_id'],row['device_id'],result)
+            if not changed:
+                continue
+            connection.execute("""INSERT INTO topology_classification_reconciliations(
+                device_id,network_id,hint_id,old_category,old_subtype,old_confidence,
+                new_category,new_subtype,new_confidence,reason) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (row['device_id'],row['network_id'],result['evidence'][0]['hint_id'],
+                 row['category'],row['subtype'],row['confidence'],result['category'],
+                 result['subtype'],result['confidence'],'Saved topology evidence'))
         applied += 1
-
         if verbose:
-            ip_row = connection.execute(
-                """
-                SELECT ip FROM addresses
-                WHERE device_id = ? AND network_id = ?
-                ORDER BY last_seen DESC, id DESC LIMIT 1
-                """,
-                (hint["device_id"], hint["network_id"]),
-            ).fetchone()
-            ip = ip_row["ip"] if ip_row else "-"
-            print(
-                f"  Klassifikation korrigiert: {ip} | "
-                f"{current['category']} -> {hint['category']} | "
-                f"{hint['subtype'] or '-'} [{hint['confidence']} %; {hint['source']}]"
-            )
-
-    connection.commit()
-    return {"hints": len(hints), "applied": applied}
+            print(f"Topologie-Klassifikation aktualisiert: Geraet {row['device_id']}")
+    return {'hints':hints,'applied':applied}
 
 
 # -----------------------------------------------------------------------------
@@ -3006,7 +2512,7 @@ def print_infrastructure(connection, network_id: int, gateway: str | None) -> No
     print_header("Erkannte Netzwerkinfrastruktur")
 
     if gateway:
-        gateway_device_id = find_device_id_by_ip(connection, gateway)
+        gateway_device_id = find_device_id_by_ip(connection, gateway, network_id)
         print(f"Gateway......: {gateway}")
         print(f"Gateway-Gerät: {get_device_display(connection, gateway_device_id)}")
         print()
@@ -3342,6 +2848,7 @@ def _endpoints_by_port(connection, snapshot_id: int, router_ip: str) -> dict[str
     return result
 
 
+@scoped_snapshot
 def print_topology_map(connection, snapshot_id: int, router_ip: str) -> None:
     """Zeigt eine konservative, menschenlesbare Topologie-Karte.
 
@@ -3352,7 +2859,7 @@ def print_topology_map(connection, snapshot_id: int, router_ip: str) -> None:
     print_header("Topologie-Karte (evidenzbasiert)")
     router_device_id = find_device_id_by_ip(connection, router_ip)
     print(f"Router/Switch: {router_ip} | {get_device_display(connection, router_device_id)}")
-    print("Legende.....: <-> bestaetigter Discovery-Nachbar | -> beobachtet/erreichbar ueber Port")
+    print("Legende.....: <-> gemeldeter LLDP/CDP-Nachbar | -> beobachtet/erreichbar ueber Port")
 
     bridges = connection.execute(
         """
@@ -3524,16 +3031,6 @@ def build_topology_report(connection, snapshot_id: int) -> dict[str, Any]:
             "SELECT * FROM topology_identity_candidates WHERE snapshot_id = ? ORDER BY id",
             (snapshot_id,),
         ),
-        "device_hints": rows(
-            """
-            SELECT h.*
-            FROM topology_device_hints h
-            JOIN topology_snapshots s ON s.network_id = h.network_id
-            WHERE s.id = ?
-            ORDER BY h.device_id, h.confidence DESC, h.last_seen DESC
-            """,
-            (snapshot_id,),
-        ),
     }
     return report
 
@@ -3593,6 +3090,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="NetChecker Phase 3 - evidenzbasierte Netzwerktopologie"
     )
+    parser.add_argument('--try-lock', action='store_true', help='Bei laufender Inventararbeit verschieben (Exit 75)')
     parser.add_argument(
         "--routeros",
         metavar="IP",
@@ -3602,6 +3100,10 @@ def parse_args() -> argparse.Namespace:
         "--routeros-user",
         default="admin",
         help="RouterOS-SSH-Benutzer (Standard: admin)",
+    )
+    parser.add_argument(
+        "--routeros-batch", action="store_true",
+        help="Keine Passwortabfrage; fuer ausdruecklich freigegebenen Automatikbetrieb",
     )
     parser.add_argument(
         "--json-out",
@@ -3624,6 +3126,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@coordinated_entry
 def main() -> int:
     args = parse_args()
     connection = None
@@ -3639,7 +3142,12 @@ def main() -> int:
     try:
         connection = get_connection()
         init_database(connection)
-        init_topology_database(connection)
+        from database import get_scope_id
+        scope_id = get_scope_id(connection)
+        connection.execute("""UPDATE topology_snapshots SET status='partial',completed_at=CURRENT_TIMESTAMP,
+            error_message='Interrupted topology cycle; preserved local evidence'
+            WHERE status='running' AND network_id IN (SELECT id FROM networks WHERE scope_id=?)""", (scope_id,))
+        connection.commit()
 
         if args.reconcile_only:
             print_header("Topologie-Klassifikation aus gespeicherter Evidenz")
@@ -3747,10 +3255,10 @@ def main() -> int:
 
         if args.routeros:
             router_ip = args.routeros
-            router_device_id = find_device_id_by_ip(connection, router_ip)
+            router_device_id = find_device_id_by_ip(connection, router_ip, network_id)
 
             try:
-                datasets = collect_routeros_via_ssh(router_ip, args.routeros_user)
+                datasets = collect_routeros_via_ssh(router_ip, args.routeros_user, batch=args.routeros_batch)
                 save_routeros_raw_records(
                     connection,
                     snapshot_id,

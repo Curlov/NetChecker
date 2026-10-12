@@ -1,9 +1,9 @@
 import ipaddress
 import time
+from runtime_lock import exclusive_cycle, inventory_lock, single_scanner
 
 from classification_store import (
     classify_and_store_inventory,
-    init_classification_tables,
 )
 
 from database import (
@@ -24,7 +24,6 @@ from database import (
 
 from enrichment import (
     get_enrichment_targets,
-    init_enrichment_status_table,
     run_enrichment,
 )
 
@@ -135,6 +134,7 @@ def count_changes_for_run(
 # Klassifikation
 # ==========================================================
 
+@exclusive_cycle
 def run_classification_cycle(
     connection,
     network_id,
@@ -168,6 +168,7 @@ def run_classification_cycle(
 # Discovery
 # ==========================================================
 
+@exclusive_cycle
 def run_discovery_cycle(
     connection,
     network_id,
@@ -353,7 +354,7 @@ def run_discovery_cycle(
         )
 
 
-        return hosts
+        return [host for host in hosts if host.get("device_id") is not None]
 
 
     except KeyboardInterrupt:
@@ -390,6 +391,7 @@ def run_discovery_cycle(
 # Detail-Scan
 # ==========================================================
 
+@exclusive_cycle
 def run_detail_cycle(
     connection,
     network_id,
@@ -501,6 +503,8 @@ def run_detail_cycle(
                 )
 
 
+                host["scan_metadata"] = details.get("scan_metadata", {})
+
                 save_port_scan(
                     connection,
                     network_id,
@@ -568,7 +572,8 @@ def run_detail_cycle(
                     connection,
                     host[
                         "device_id"
-                    ]
+                    ],
+                    network_id=network_id,
                 )
 
 
@@ -673,16 +678,17 @@ def run_detail_cycle(
 # Enrichment
 # ==========================================================
 
+@exclusive_cycle
 def run_enrichment_cycle(
     connection,
     network_id
 ):
     """
     Prüft nach dem Detail-Scan, welche Geräte noch
-    zusätzliche OS-Erkennung benötigen.
+    zusätzliche OS- oder Service-Erkennung benötigen.
 
-    Bereits bekannte Betriebssysteme werden nicht
-    erneut untersucht.
+    Bereits bekannte Betriebssysteme werden nicht erneut untersucht;
+    fehlende Serviceinformationen werden unabhängig davon ausgewählt.
     """
 
     targets, stats = get_enrichment_targets(
@@ -713,6 +719,8 @@ def run_enrichment_cycle(
         f"  OS erfolglos versucht.: "
         f"{stats['no_os_detected']}"
     )
+    print(f"  Service-LIGHT..........: {stats['service_targets']}")
+    print(f"  Service später (Budget): {stats['service_deferred']}")
 
 
     if not targets:
@@ -734,6 +742,7 @@ def run_enrichment_cycle(
 # Hauptprogramm
 # ==========================================================
 
+@single_scanner
 def main():
 
     connection = get_connection()
@@ -745,24 +754,9 @@ def main():
         # Datenbank
         # ==================================================
 
-        init_database(
-            connection
-        )
-
-
-        init_classification_tables(
-            connection
-        )
-
-
-        init_enrichment_status_table(
-            connection
-        )
-
-
-        recover_interrupted_scan_runs(
-            connection
-        )
+        with inventory_lock():
+            init_database(connection)
+            recover_interrupted_scan_runs(connection)
 
 
         # ==================================================

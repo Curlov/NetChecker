@@ -29,7 +29,8 @@ def display_value(value):
 
 def get_saved_classification(
     connection,
-    device_id
+    device_id,
+    network_id=None,
 ):
     """
     Liest die zuletzt gespeicherte Klassifikation
@@ -55,13 +56,14 @@ def get_saved_classification(
             FROM device_classifications
 
             WHERE device_id = ?
+              AND (? IS NULL OR network_id = ?)
 
             ORDER BY
                 last_classified_at DESC
 
             LIMIT 1
             """,
-            (device_id,)
+            (device_id,network_id,network_id)
         ).fetchone()
 
     except Exception:
@@ -212,7 +214,8 @@ def print_ports(ports):
 
 def print_device(
     connection,
-    device_id
+    device_id,
+    network_id=None,
 ):
     """
     Gibt den aktuellen bekannten Zustand eines Gerätes aus.
@@ -223,7 +226,8 @@ def print_device(
 
     devices = get_inventory(
         connection,
-        device_id
+        device_id,
+        network_id=network_id,
     )
 
 
@@ -242,7 +246,8 @@ def print_device(
 
     classification = get_saved_classification(
         connection,
-        device_id
+        device_id,
+        network_id=network_id,
     )
 
 

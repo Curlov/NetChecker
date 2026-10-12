@@ -1,7 +1,9 @@
 
 import json
+import hashlib
 import socket
 import subprocess
+import platform
 from pathlib import Path
 
 
@@ -55,7 +57,8 @@ def get_local_host(interface):
         "ip": ipv4[0],
         "mac": mac,
         "hostname": socket.gethostname(),
-        "vendor": None
+        "vendor": None,
+        "local_identity_key": hashlib.sha256(Path('/etc/machine-id').read_bytes().strip()).hexdigest(),
     }
 
 
@@ -92,5 +95,12 @@ def enrich_local_host(hosts, interface):
     host["hostname"] = (
         host.get("hostname") or local["hostname"]
     )
+    host['local_identity_key'] = local['local_identity_key']
+    release = platform.freedesktop_os_release()
+    values = [('family', 'Linux'), ('kernel', platform.release()),
+              ('distribution', release.get('NAME')), ('distribution_version', release.get('PRETTY_NAME'))]
+    host['local_os_claims'] = [dict(kind=kind, value=value, source='local_os_release',
+        status='confirmed', confidence=100, evidence={'field':kind, 'value':value})
+        for kind,value in values if value]
 
     return hosts

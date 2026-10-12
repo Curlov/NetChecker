@@ -13,7 +13,7 @@ Produktionsschutz
 -----------------
 - Keine Konfigurationsaenderungen an Routern/Switches.
 - Topologie laeuft standardmaessig nur lokal/passiv.
-- RouterOS wird automatisch nur dann zusaetzlich gelesen, wenn bereits eine
+- RouterOS wird nur fuer ausdruecklich konfigurierte Ziele gelesen, wenn eine
   passwortfreie SSH-Authentifizierung vorhanden und erfolgreich testbar ist.
 - Es werden keine Passwoerter gespeichert.
 - Topologie wird nicht gestartet, solange ein NetChecker-Scanlauf den Status
@@ -23,6 +23,7 @@ Produktionsschutz
 from __future__ import annotations
 
 import os
+import ipaddress
 import signal
 import sqlite3
 import subprocess
@@ -35,7 +36,7 @@ from typing import Iterable
 BASE_DIR = Path(__file__).resolve().parent
 CORE_PATH = BASE_DIR / "netchecker_core.py"
 TOPOLOGY_PATH = BASE_DIR / "topology.py"
-DATABASE_PATH = BASE_DIR / "data" / "netchecker.db"
+from runtime_config import DATABASE_PATH
 
 # Discovery bleibt Sache des bestehenden Core-NetCheckers.
 # Die Topologie aendert sich deutlich seltener, daher genuegen 30 Minuten.
@@ -289,7 +290,15 @@ def resolve_automatic_routeros_targets() -> list[tuple[str, str]]:
     Wichtig: Ohne lokale SSH-Key-/Agent-Identitaet gibt es keinerlei
     Authentifizierungsversuch gegen das Produktionsgeraet.
     """
-    candidates = discover_routeros_candidates()
+    # A working SSH identity is not permission to contact infrastructure.
+    # Only literal addresses explicitly listed by the operator are eligible.
+    allowed = os.environ.get("NETCHECKER_ROUTEROS_TARGETS", "").strip()
+    if not allowed:
+        return []
+    candidates = []
+    for target in allowed.split(","):
+        ip = str(ipaddress.ip_address(target.strip()))
+        candidates.append((ip, ROUTEROS_DEFAULT_USER))
     if not candidates:
         return []
 
@@ -328,18 +337,17 @@ def build_topology_command(
         sys.executable,
         str(TOPOLOGY_PATH),
         "--json-out",
+        "--try-lock",
     ]
 
-    # Die aktuelle topology.py verarbeitet ein RouterOS-Ziel pro Snapshot.
-    # Deshalb nehmen wir fuer Phase 3 zunaechst genau ein automatisch
-    # authentifizierbares Ziel. Weitere Router koennen spaeter ueber das
-    # Quellenmodell ergaenzt werden.
+    # Ein RouterOS-Ziel pro Snapshot; run_topology_cycle bearbeitet alle Ziele.
     targets = list(automatic_routeros_targets)
     if targets:
         ip, user = targets[0]
         command.extend([
             "--routeros", ip,
             "--routeros-user", user,
+            "--routeros-batch",
         ])
 
     return command
@@ -354,12 +362,15 @@ def run_topology_cycle(
     print("Intervall.....: 30 Minuten")
     print("Startbedingung: kein laufender NetChecker-Scan")
 
-    command = build_topology_command(automatic_routeros_targets)
-
-    # stdin bleibt am Terminal. Ein RouterOS-Ziel wird hier aber nur dann
-    # angehaengt, wenn der Batch-Preflight bereits passwortfrei funktioniert
-    # hat; dadurch entsteht im Automatikbetrieb kein Passwortprompt.
-    result = subprocess.run(command)
+    targets = list(automatic_routeros_targets)
+    return_code = 0
+    for target in targets or [None]:
+        command = build_topology_command([target] if target else [])
+        result = subprocess.run(command, stdin=subprocess.DEVNULL)
+        if result.returncode == 75:
+            return 75
+        if result.returncode:
+            return_code = result.returncode
 
     if result.returncode == 0:
         print("Topologie.....: erfolgreich gespeichert")
@@ -368,7 +379,7 @@ def run_topology_cycle(
     else:
         print(f"Topologie.....: Fehler, Exit-Code {result.returncode}")
 
-    return result.returncode
+    return return_code
 
 
 def run_classification_reconcile() -> int:
@@ -377,61 +388,30 @@ def run_classification_reconcile() -> int:
         sys.executable,
         str(TOPOLOGY_PATH),
         "--reconcile-only",
+        "--try-lock",
     ])
     return result.returncode
 
 
 def run_serial_classification_reconcile(core: subprocess.Popen) -> bool:
-    """Reconciled die Klassifikation nur in einem scanfreien SQLite-Fenster."""
+    """Try cooperative work without suspending the scanner."""
     if scan_is_running() or core.poll() is not None:
         return False
-
-    core.send_signal(signal.SIGSTOP)
-    time.sleep(0.1)
-
-    try:
-        if scan_is_running():
-            return False
-        run_classification_reconcile()
-        return True
-    finally:
-        if core.poll() is None:
-            core.send_signal(signal.SIGCONT)
+    return run_classification_reconcile() != 75
 
 
 def run_serial_topology_cycle(
     core: subprocess.Popen,
     automatic_routeros_targets: Iterable[tuple[str, str]],
 ) -> bool:
-    """
-    Garantiert, dass der Core waehrend des Topologie-Laufs keinen neuen Scan
-    beginnt. Der Core wird nur in einem bereits scanfreien Fenster kurz mit
-    SIGSTOP angehalten und danach mit SIGCONT fortgesetzt.
-
-    Rueckgabe:
-        True  -> Topologie wurde gestartet.
-        False -> Es lief doch noch ein Scan; Lauf wurde verschoben.
-    """
+    """The child obtains the same cycle lock as the core, or postpones."""
     if scan_is_running():
         return False
 
     if core.poll() is not None:
         return False
 
-    core.send_signal(signal.SIGSTOP)
-    time.sleep(0.2)
-
-    try:
-        # Zweite Kontrolle nach dem Anhalten schliesst das kleine Zeitfenster
-        # zwischen erster DB-Pruefung und SIGSTOP.
-        if scan_is_running():
-            return False
-
-        run_topology_cycle(automatic_routeros_targets)
-        return True
-    finally:
-        if core.poll() is None:
-            core.send_signal(signal.SIGCONT)
+    return run_topology_cycle(automatic_routeros_targets) != 75
 
 
 def start_core() -> subprocess.Popen:

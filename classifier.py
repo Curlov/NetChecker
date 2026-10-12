@@ -1,5 +1,7 @@
 import ipaddress
 from collections import defaultdict
+from mac_analysis import analyze_mac
+from runtime_lock import exclusive_cycle
 
 from database import (
     get_connection,
@@ -170,6 +172,9 @@ def contains_service_text(
                 normalize(
                     port.get("version")
                 ),
+                normalize(port.get('extrainfo')),
+                normalize(port.get('ostype')),
+                normalize(' '.join(port.get('cpe') or [])),
             ]
         )
 
@@ -186,26 +191,7 @@ def is_locally_administered_mac(
     Erkennt lokal vergebene / randomisierte MAC-Adressen.
     """
 
-    if not mac_address:
-        return False
-
-    try:
-
-        first_byte = int(
-            mac_address.split(":")[0],
-            16
-        )
-
-    except (
-        ValueError,
-        IndexError
-    ):
-
-        return False
-
-    return bool(
-        first_byte & 0x02
-    )
+    return analyze_mac(mac_address).get("locally_administered", False)
 
 
 # ==========================================================
@@ -388,6 +374,11 @@ def detect_subtype(
     os_name = normalize(
         os_info.get("name")
     )
+
+    if not os_name:
+        family = (device.get('os_summary') or {}).get('family')
+        if family and not family.get('stale'):
+            os_name = normalize(family['value'])
 
 
     # ======================================================
@@ -731,6 +722,10 @@ def classify_device(device):
     os_name = normalize(
         os_info.get("name")
     )
+    if not os_name:
+        family = (device.get('os_summary') or {}).get('family')
+        if family and not family.get('stale'):
+            os_name = normalize(family['value'])
 
 
     # ======================================================
@@ -1666,6 +1661,7 @@ def print_summary(
 # Hauptprogramm
 # ==========================================================
 
+@exclusive_cycle
 def main():
 
     connection = get_connection()

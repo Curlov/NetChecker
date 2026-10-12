@@ -3,6 +3,7 @@ import tempfile
 import sys
 import time
 import xml.etree.ElementTree as ET
+from scan_parser import parse_services, scan_metadata
 
 
 def run_nmap(command):
@@ -15,7 +16,8 @@ def run_nmap(command):
             command,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=90,
         )
 
         return result.stdout
@@ -23,11 +25,11 @@ def run_nmap(command):
     except subprocess.CalledProcessError as error:
         print("Fehler beim Ausführen von Nmap.")
         print(error.stderr)
-        sys.exit(1)
+        raise RuntimeError("Nmap discovery failed") from error
 
     except FileNotFoundError:
         print("Nmap wurde nicht gefunden.")
-        sys.exit(1)
+        raise RuntimeError("Nmap executable not found")
 
 
 def get_vendor_from_mac(mac_address):
@@ -231,14 +233,12 @@ def scan_host_details(ip_address):
             ip_address
         ] """
 
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
-
-        return_code = process.wait()
+        try:
+            process = subprocess.run(command, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, text=True, timeout=35)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        return_code = process.returncode
 
         if return_code != 0:
 
@@ -275,96 +275,12 @@ def scan_host_details(ip_address):
         host_element = root.find("host")
 
         if host_element is None:
-            return result
+            return None
 
-        # -----------------------------------------
-        # Offene TCP-Ports
-        # -----------------------------------------
-
-        for port_element in host_element.findall(
-            "ports/port"
-        ):
-
-            state_element = port_element.find(
-                "state"
-            )
-
-            if state_element is None:
-                continue
-
-            state = state_element.get("state")
-
-            if state != "open":
-                continue
-
-            service_element = port_element.find(
-                "service"
-            )
-
-            service = None
-            product = None
-            version = None
-
-            if service_element is not None:
-
-                service = service_element.get(
-                    "name"
-                )
-
-                product = service_element.get(
-                    "product"
-                )
-
-                version = service_element.get(
-                    "version"
-                )
-
-            result["ports"].append(
-                {
-                    "port": int(
-                        port_element.get(
-                            "portid"
-                        )
-                    ),
-                    "protocol": port_element.get(
-                        "protocol"
-                    ),
-                    "state": state,
-                    "service": service,
-                    "product": product,
-                    "version": version
-                }
-            )
-
-        # -----------------------------------------
-        # Betriebssystem
-        # -----------------------------------------
-
-        os_matches = host_element.findall(
-            "os/osmatch"
-        )
-
-        if os_matches:
-
-            best_match = max(
-                os_matches,
-                key=lambda match: int(
-                    match.get(
-                        "accuracy",
-                        "0"
-                    )
-                )
-            )
-
-            result["os"] = {
-                "name": best_match.get("name"),
-                "accuracy": int(
-                    best_match.get(
-                        "accuracy",
-                        "0"
-                    )
-                ),
-                "source": "nmap"
-            }
-
+        if host_element.get("timedout") == "true":
+            return None
+        result["ports"] = parse_services(host_element)
+        result["scan_metadata"] = scan_metadata(root, host_element)
+        if not result['scan_metadata']['complete']:
+            return None
         return result
