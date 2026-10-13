@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -1289,6 +1289,60 @@ def initialize_database(connection):
                 )
                 BEGIN
                     SELECT RAISE(ABORT,'device does not belong to room layout network');
+                END;
+                """)
+            if version < 8:
+                room_columns = {
+                    row[1] for row in connection.execute('PRAGMA table_info(topology_rooms)')
+                }
+                if 'parent_room_id' not in room_columns:
+                    connection.execute(
+                        "ALTER TABLE topology_rooms ADD COLUMN parent_room_id INTEGER "
+                        "REFERENCES topology_rooms(id) ON DELETE SET NULL "
+                        "CHECK(parent_room_id IS NULL OR parent_room_id != id)"
+                    )
+                execute_script(connection, """
+                CREATE INDEX IF NOT EXISTS idx_topology_rooms_parent
+                    ON topology_rooms(layout_id,parent_room_id,id);
+
+                CREATE TRIGGER IF NOT EXISTS topology_rooms_parent_validate_insert
+                BEFORE INSERT ON topology_rooms
+                WHEN NEW.parent_room_id IS NOT NULL AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM topology_rooms p
+                        WHERE p.id=NEW.parent_room_id AND p.layout_id=NEW.layout_id
+                    ) OR EXISTS (
+                        WITH RECURSIVE descendants(id) AS (
+                            SELECT id FROM topology_rooms WHERE parent_room_id=NEW.id
+                            UNION
+                            SELECT r.id FROM topology_rooms r
+                            JOIN descendants d ON r.parent_room_id=d.id
+                        )
+                        SELECT 1 FROM descendants WHERE id=NEW.parent_room_id
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT,'invalid parent room');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS topology_rooms_parent_validate_update
+                BEFORE UPDATE OF parent_room_id,layout_id ON topology_rooms
+                WHEN NEW.parent_room_id IS NOT NULL AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM topology_rooms p
+                        WHERE p.id=NEW.parent_room_id AND p.layout_id=NEW.layout_id
+                    ) OR EXISTS (
+                        WITH RECURSIVE descendants(id) AS (
+                            SELECT id FROM topology_rooms WHERE parent_room_id=NEW.id
+                            UNION
+                            SELECT r.id FROM topology_rooms r
+                            JOIN descendants d ON r.parent_room_id=d.id
+                        )
+                        SELECT 1 FROM descendants WHERE id=NEW.parent_room_id
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT,'invalid parent room');
                 END;
                 """)
             for migration in range(version + 1, SCHEMA_VERSION + 1):

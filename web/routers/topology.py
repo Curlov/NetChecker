@@ -92,6 +92,7 @@ class LayoutSaveRequest(BaseModel):
 
 class RoomCreate(BaseModel):
     layout_id: int | None = Field(default=None, gt=0, strict=True)
+    parent_room_id: int | None = Field(default=None, gt=0, strict=True)
     name: str = Field(..., min_length=1, max_length=120, strict=True)
     description: str = Field(default='', max_length=2000, strict=True)
     grid_x: int = Field(..., ge=-1000000, le=1000000, strict=True)
@@ -146,6 +147,7 @@ class RoomGeometry(BaseModel):
     grid_y: int = Field(..., ge=-1000000, le=1000000, strict=True)
     grid_width: int = Field(..., ge=2, le=10000, strict=True)
     grid_height: int = Field(..., ge=2, le=10000, strict=True)
+    parent_room_id: int | None = Field(default=None, gt=0, strict=True)
     move_contents: bool | None = None
 
     class Config:
@@ -191,7 +193,6 @@ class ManualNodeUpdate(BaseModel):
     linked_device_id: int | None = Field(default=None, gt=0, strict=True)
     grid_x: int | None = Field(default=None, ge=-1000000, le=1000000, strict=True)
     grid_y: int | None = Field(default=None, ge=-1000000, le=1000000, strict=True)
-    is_hidden: bool | None = None
 
     @validator('label')
     def validate_label(cls, value):
@@ -247,7 +248,9 @@ def layout_payload(db, network_id, layout):
             item['properties'] = properties if isinstance(properties, dict) else {}
         except (TypeError, ValueError):
             item['properties'] = {}
-        item['is_hidden'] = bool(item['is_hidden'])
+        # Keep legacy visibility state in SQLite for compatibility, but the
+        # editor no longer supports hiding topology objects.
+        item.pop('is_hidden', None)
         manual_nodes.append(item)
     rooms = [dict(row) for row in db.execute(
         'SELECT * FROM topology_rooms WHERE layout_id=? ORDER BY id', (layout['id'],)
@@ -325,6 +328,54 @@ def _room_for_network(db, room_id, network_id):
     if room is None:
         raise HTTPException(404, 'Raum gehört nicht zum gewählten Netzwerk')
     return room
+
+
+def _validate_room_parent(db, layout_id, room_id, parent_room_id, geometry):
+    if parent_room_id is None:
+        return
+    parent = db.execute(
+        'SELECT * FROM topology_rooms WHERE id=? AND layout_id=?',
+        (parent_room_id, layout_id),
+    ).fetchone()
+    if parent is None:
+        raise HTTPException(404, 'Übergeordneter Raum gehört nicht zum gewählten Layout')
+    if room_id is not None:
+        if parent_room_id == room_id:
+            raise HTTPException(409, 'Ein Raum kann nicht sein eigener Unterraum sein')
+        descendant = db.execute(
+            """WITH RECURSIVE descendants(id) AS (
+                   SELECT id FROM topology_rooms WHERE parent_room_id=?
+                   UNION
+                   SELECT r.id FROM topology_rooms r
+                   JOIN descendants d ON r.parent_room_id=d.id
+               )
+               SELECT 1 FROM descendants WHERE id=?""",
+            (room_id, parent_room_id),
+        ).fetchone()
+        if descendant:
+            raise HTTPException(409, 'Die Raumverschachtelung würde einen Zyklus erzeugen')
+    if not (
+        geometry['grid_x'] >= parent['grid_x']
+        and geometry['grid_y'] >= parent['grid_y']
+        and geometry['grid_x'] + geometry['grid_width'] <= parent['grid_x'] + parent['grid_width']
+        and geometry['grid_y'] + geometry['grid_height'] <= parent['grid_y'] + parent['grid_height']
+    ):
+        raise HTTPException(409, 'Der Unterraum muss vollständig innerhalb seines übergeordneten Raums liegen')
+
+
+def _room_subtree(db, room_id, layout_id):
+    return [dict(row) for row in db.execute(
+        """WITH RECURSIVE subtree(id) AS (
+               SELECT id FROM topology_rooms WHERE id=? AND layout_id=?
+               UNION
+               SELECT r.id FROM topology_rooms r
+               JOIN subtree s ON r.parent_room_id=s.id
+               WHERE r.layout_id=?
+           )
+           SELECT r.* FROM topology_rooms r JOIN subtree s ON s.id=r.id
+           WHERE r.layout_id=? ORDER BY r.id""",
+        (room_id, layout_id, layout_id, layout_id),
+    )]
 
 
 def _apply_room_assignment(db, network_id, layout_id, assignment):
@@ -451,7 +502,7 @@ def _manual_node_payload(db, node_id):
         item['properties'] = properties if isinstance(properties, dict) else {}
     except (TypeError, ValueError):
         item['properties'] = {}
-    item['is_hidden'] = bool(item['is_hidden'])
+    item.pop('is_hidden', None)
     return item
 
 
@@ -684,6 +735,11 @@ def create_room(payload: RoomCreate, network_id: int = Query(..., ge=1)):
         db.execute('BEGIN IMMEDIATE')
         require_network(db, network_id)
         layout = _layout_for_network(db, network_id, payload.layout_id)
+        geometry = {
+            'grid_x':payload.grid_x,'grid_y':payload.grid_y,
+            'grid_width':payload.grid_width,'grid_height':payload.grid_height,
+        }
+        _validate_room_parent(db, layout['id'], None, payload.parent_room_id, geometry)
         duplicate = db.execute(
             'SELECT 1 FROM topology_rooms WHERE layout_id=? AND lower(name)=lower(?)',
             (layout['id'], payload.name),
@@ -700,10 +756,11 @@ def create_room(payload: RoomCreate, network_id: int = Query(..., ge=1)):
         )
         cursor = db.execute(
             """INSERT INTO topology_rooms(
-                   layout_id,name,description,grid_x,grid_y,grid_width,grid_height,move_contents
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (layout['id'], payload.name, payload.description, payload.grid_x, payload.grid_y,
-             payload.grid_width, payload.grid_height, int(payload.move_contents)),
+                   layout_id,parent_room_id,name,description,grid_x,grid_y,grid_width,grid_height,move_contents
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (layout['id'],payload.parent_room_id,payload.name,payload.description,
+             payload.grid_x,payload.grid_y,payload.grid_width,payload.grid_height,
+             int(payload.move_contents)),
         )
         layout = db.execute('SELECT * FROM topology_layouts WHERE id=?', (layout['id'],)).fetchone()
         result = layout_payload(db, network_id, layout)
@@ -768,30 +825,82 @@ def update_room_geometry(
         db.execute('BEGIN IMMEDIATE')
         require_network(db, network_id)
         room = _room_for_network(db, room_id, network_id)
+        fields = payload.model_dump(exclude_unset=True)
+        geometry = {
+            'grid_x':payload.grid_x,'grid_y':payload.grid_y,
+            'grid_width':payload.grid_width,'grid_height':payload.grid_height,
+        }
+        parent_room_id = fields.get('parent_room_id',room['parent_room_id'])
+        _validate_room_parent(
+            db,room['layout_id'],room_id,parent_room_id,geometry,
+        )
         delta_x = payload.grid_x - room['grid_x']
         delta_y = payload.grid_y - room['grid_y']
-        # This flag describes this geometry operation, not the room's saved
-        # preference. Resizes omit it; only an explicit move request may
-        # translate assigned nodes. The preference stays editable via RoomUpdate.
         move_contents = payload.move_contents is True
+        subtree = _room_subtree(db,room_id,room['layout_id'])
+        subtree_ids = [item['id'] for item in subtree]
+        room_by_id = {item['id']:item for item in subtree}
+        move_rooms = move_contents and bool(delta_x or delta_y)
+        moved_room_geometry = {}
+        for item in subtree:
+            if item['id'] == room_id:
+                next_geometry = geometry
+            else:
+                offset_x,offset_y = (delta_x,delta_y) if move_rooms else (0,0)
+                next_geometry = {
+                    'grid_x':item['grid_x']+offset_x,
+                    'grid_y':item['grid_y']+offset_y,
+                    'grid_width':item['grid_width'],
+                    'grid_height':item['grid_height'],
+                }
+            if (next_geometry['grid_x'] < -1000000 or next_geometry['grid_y'] < -1000000 or
+                next_geometry['grid_x']+next_geometry['grid_width'] > 1000000 or
+                next_geometry['grid_y']+next_geometry['grid_height'] > 1000000):
+                raise HTTPException(409, 'Die Raumbewegung überschreitet den gültigen Rasterbereich')
+            moved_room_geometry[item['id']] = next_geometry
+
+        # Every nested room remains fully within its immediate parent. A room
+        # move translates the whole subtree; a resize leaves descendants still.
+        for item in subtree:
+            if item['id'] == room_id:
+                continue
+            parent = room_by_id.get(item['parent_room_id'])
+            child_geometry = moved_room_geometry[item['id']]
+            parent_geometry = moved_room_geometry.get(item['parent_room_id'])
+            if parent is None or parent_geometry is None or not (
+                child_geometry['grid_x'] >= parent_geometry['grid_x'] and
+                child_geometry['grid_y'] >= parent_geometry['grid_y'] and
+                child_geometry['grid_x']+child_geometry['grid_width'] <=
+                    parent_geometry['grid_x']+parent_geometry['grid_width'] and
+                child_geometry['grid_y']+child_geometry['grid_height'] <=
+                    parent_geometry['grid_y']+parent_geometry['grid_height']
+            ):
+                raise HTTPException(409, 'Die Änderung würde einen Unterraum aus seinem Elternraum verschieben')
+
+        # This flag describes the geometry operation, not the room's saved
+        # preference. Resizes omit it; explicit moves translate nested rooms
+        # and assigned nodes together. The preference stays editable via RoomUpdate.
         moving_devices = []
         moving_manual = []
         if move_contents and (delta_x or delta_y):
             moving_devices = [dict(row) for row in db.execute(
                 """SELECT p.device_id,p.grid_x,p.grid_y FROM topology_room_devices m
                    JOIN topology_layout_positions p ON p.layout_id=m.layout_id AND p.device_id=m.device_id
-                   WHERE m.room_id=? AND m.layout_id=?""", (room_id, room['layout_id']))]
+                   WHERE m.room_id IN (%s) AND m.layout_id=?""" %
+                   ','.join('?' for _ in subtree_ids), (*subtree_ids,room['layout_id']))]
             device_members = db.execute(
                 """SELECT m.device_id FROM topology_room_devices m
                    LEFT JOIN topology_layout_positions p ON p.layout_id=m.layout_id AND p.device_id=m.device_id
-                   WHERE m.room_id=? AND p.device_id IS NULL""", (room_id,)
+                   WHERE m.room_id IN (%s) AND p.device_id IS NULL""" %
+                   ','.join('?' for _ in subtree_ids), subtree_ids
             ).fetchone()
             if device_members:
                 raise HTTPException(409, 'Ein enthaltenes Gerät besitzt keine gespeicherte Position')
             moving_manual = [dict(row) for row in db.execute(
                 """SELECT n.id AS manual_node_id,n.grid_x,n.grid_y FROM topology_room_manual_nodes m
                    JOIN topology_manual_nodes n ON n.id=m.manual_node_id AND n.layout_id=m.layout_id
-                   WHERE m.room_id=? AND m.layout_id=?""", (room_id, room['layout_id']))]
+                   WHERE m.room_id IN (%s) AND m.layout_id=?""" %
+                   ','.join('?' for _ in subtree_ids), (*subtree_ids,room['layout_id']))]
             moving = {('device', row['device_id']) for row in moving_devices}
             moving.update(('manual', row['manual_node_id']) for row in moving_manual)
             target_cells = set()
@@ -856,10 +965,19 @@ def update_room_geometry(
                     [(row['grid_x'] + delta_x, row['grid_y'] + delta_y,
                       row['manual_node_id'], room['layout_id']) for row in moving_manual],
                 )
+        if move_rooms and len(subtree) > 1:
+            db.executemany(
+                """UPDATE topology_rooms SET grid_x=?,grid_y=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND layout_id=?""",
+                [(moved_room_geometry[item['id']]['grid_x'],
+                  moved_room_geometry[item['id']]['grid_y'],item['id'],room['layout_id'])
+                 for item in subtree if item['id'] != room_id],
+            )
         db.execute(
             """UPDATE topology_rooms SET grid_x=?,grid_y=?,grid_width=?,grid_height=?,
-                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-            (payload.grid_x,payload.grid_y,payload.grid_width,payload.grid_height,room_id),
+                   parent_room_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (payload.grid_x,payload.grid_y,payload.grid_width,payload.grid_height,
+             parent_room_id,room_id),
         )
         db.execute('UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (room['layout_id'],))
         layout = db.execute('SELECT * FROM topology_layouts WHERE id=?', (room['layout_id'],)).fetchone()
@@ -883,10 +1001,10 @@ def duplicate_room(room_id: int, network_id: int = Query(..., ge=1)):
         ).fetchone():
             name = f"{base_name} {suffix}"; suffix += 1
         cursor = db.execute(
-            """INSERT INTO topology_rooms(layout_id,name,description,grid_x,grid_y,
+            """INSERT INTO topology_rooms(layout_id,parent_room_id,name,description,grid_x,grid_y,
                    grid_width,grid_height,move_contents)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (room['layout_id'],name,room['description'],room['grid_x'],room['grid_y'],
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (room['layout_id'],room['parent_room_id'],name,room['description'],room['grid_x'],room['grid_y'],
              room['grid_width'],room['grid_height'],room['move_contents']),
         )
         db.execute('UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (room['layout_id'],))
@@ -902,6 +1020,11 @@ def delete_room(room_id: int, network_id: int = Query(..., ge=1)):
         db.execute('BEGIN IMMEDIATE')
         require_network(db, network_id)
         room = _room_for_network(db, room_id, network_id)
+        db.execute(
+            """UPDATE topology_rooms SET parent_room_id=NULL,updated_at=CURRENT_TIMESTAMP
+               WHERE parent_room_id=? AND layout_id=?""",
+            (room_id,room['layout_id']),
+        )
         db.execute('DELETE FROM topology_rooms WHERE id=?', (room_id,))
         db.execute('UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (room['layout_id'],))
         layout = db.execute('SELECT * FROM topology_layouts WHERE id=?', (room['layout_id'],)).fetchone()
@@ -973,18 +1096,18 @@ def update_manual_node(
     payload: ManualNodeUpdate,
     network_id: int = Query(..., ge=1),
 ):
-    """Edit properties, association, visibility, or snapped position."""
+    """Edit properties, association, or snapped position."""
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(422, 'Keine Änderungen angegeben')
     if ('node_type' in changes and changes['node_type'] is None) or (
         'label' in changes and changes['label'] is None
     ) or ('properties' in changes and changes['properties'] is None) or (
-        'is_hidden' in changes and changes['is_hidden'] is None
-    ) or ('grid_x' in changes and changes['grid_x'] is None) or (
+        'grid_x' in changes and changes['grid_x'] is None
+    ) or (
         'grid_y' in changes and changes['grid_y'] is None
     ):
-        raise HTTPException(422, 'Typ, Bezeichnung, Eigenschaften und Sichtbarkeit dürfen nicht null sein')
+        raise HTTPException(422, 'Typ, Bezeichnung, Eigenschaften und Rasterposition dürfen nicht null sein')
 
     with get_write_connection() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -1018,23 +1141,14 @@ def update_manual_node(
 
         grid_x = changes.get('grid_x',node['grid_x'])
         grid_y = changes.get('grid_y',node['grid_y'])
-        is_hidden = bool(changes.get('is_hidden',node['is_hidden']))
         occupied = _occupied_cells(db,node['layout_id'],exclude_manual_id=manual_node_id)
         link_changed = 'linked_device_id' in changes and linked_device_id != node['linked_device_id']
         if (link_changed and linked_device_id is not None and
             'grid_x' not in changes and 'grid_y' not in changes and
             (grid_x,grid_y) in occupied):
             grid_x,grid_y = _first_free_cell(db,node['layout_id'])
-        if ((('grid_x' in changes or 'grid_y' in changes) or
-             ('is_hidden' in changes and not is_hidden)) and (grid_x,grid_y) in occupied):
-            if bool(node['is_hidden']) and not is_hidden and not (
-                'grid_x' in changes or 'grid_y' in changes
-            ):
-                # A hidden node may have had its former cell reused. Put it on
-                # the first free cell so re-showing it always remains possible.
-                grid_x,grid_y = _first_free_cell(db,node['layout_id'])
-            else:
-                raise HTTPException(409, 'Rasterplatz ist bereits durch einen anderen Node belegt')
+        if (('grid_x' in changes or 'grid_y' in changes) and (grid_x,grid_y) in occupied):
+            raise HTTPException(409, 'Rasterplatz ist bereits durch einen anderen Node belegt')
         properties = changes.get('properties')
         properties_json = (
             json.dumps(properties,ensure_ascii=False,sort_keys=True)
@@ -1042,10 +1156,10 @@ def update_manual_node(
         )
         db.execute(
             """UPDATE topology_manual_nodes SET node_type=?,label=?,properties_json=?,
-               linked_device_id=?,linked_network_id=?,grid_x=?,grid_y=?,is_hidden=?,
+               linked_device_id=?,linked_network_id=?,grid_x=?,grid_y=?,
                updated_at=CURRENT_TIMESTAMP WHERE id=?""",
             (node_type,label,properties_json,linked_device_id,linked_network_id,
-             grid_x,grid_y,int(is_hidden),manual_node_id),
+             grid_x,grid_y,manual_node_id),
         )
         db.execute(
             'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',

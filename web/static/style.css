@@ -370,7 +370,7 @@ tbody tr[data-device-id] {
 .change-details .change-note .icon-text { align-items:flex-start; }
 .change-details pre { margin:0; padding:10px; border:1px solid #334155; border-radius:6px;
     background:#111c30; color:#e2e8f0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:300px; overflow:auto; }
-.topology-viewport { width:100%; height:min(500px,70vh); min-height:280px; overflow:hidden; border:1px solid #475569;
+.topology-viewport { width:100%; height:min(580px,78vh); min-height:280px; overflow:hidden; border:1px solid #475569;
     border-radius:6px; background:#0f172a; }
 .topology-viewport #topology-graph { display:block; width:100%; height:100%; border:0; min-width:0; max-width:none; cursor:grab; }
 .topology-viewport #topology-graph.topology-panning { cursor:grabbing; }
@@ -611,14 +611,6 @@ header nav a:focus-visible { outline:2px solid #38bdf8; outline-offset:4px; }
 .topology-context-menu button.danger { color:#fecaca; border-color:#7f1d1d; }
 .topology-context-menu .topology-menu-status { color:#aab6c2; font-size:.82rem; overflow-wrap:anywhere; }
 .topology-context-menu .topology-menu-status[data-state="error"] { color:#f87171; }
-.topology-hidden-panel { margin-top:10px; border:1px solid #334155; border-radius:6px; background:#111c30; }
-.topology-hidden-panel > summary { padding:8px 10px; color:#cbd5e1; cursor:pointer; }
-.topology-hidden-panel > summary span { margin-left:5px; color:#94a3b8; font-variant-numeric:tabular-nums; }
-.topology-hidden-list { display:grid; gap:5px; padding:0 8px 8px; }
-.topology-hidden-item { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 7px; border:1px solid #334155; border-radius:5px; }
-.topology-hidden-item span, .topology-hidden-empty { min-width:0; color:#cbd5e1; font-size:.85rem; overflow-wrap:anywhere; }
-.topology-hidden-item small { min-width:0; margin-left:auto; color:#94a3b8; font-size:.75rem; overflow-wrap:anywhere; }
-.topology-hidden-item button { flex:0 0 auto; min-height:28px; padding:4px 8px; }
 .topology-property-list { display:grid; gap:5px; }
 .topology-property-row { display:grid; grid-template-columns:minmax(72px,.8fr) minmax(90px,1fr) auto; align-items:center; gap:5px; }
 .topology-property-row input { width:100%; }

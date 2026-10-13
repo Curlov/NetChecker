@@ -224,13 +224,9 @@ class WebTest(unittest.TestCase):
         self.assertEqual(200,status)
         self.assertEqual('router',updated['node']['node_type'])
         self.assertEqual({'hostname':'gateway-1'},updated['node']['properties'])
+        self.assertNotIn('is_hidden',updated['node'])
 
-        status, hidden = self.put(edit_url,{'is_hidden':True})
-        self.assertEqual(200,status)
-        self.assertTrue(hidden['node']['is_hidden'])
-        status, visible = self.put(edit_url,{'is_hidden':False})
-        self.assertEqual(200,status)
-        self.assertFalse(visible['node']['is_hidden'])
+        self.assertEqual(422,self.put(edit_url,{'is_hidden':True})[0])
 
         # The batch-position API stores manual positions alongside device
         # positions and rejects collisions across the two node origins.
@@ -457,6 +453,144 @@ class WebTest(unittest.TestCase):
         self.assertEqual((1,2),(after_delete['positions'][0]['grid_x'],after_delete['positions'][0]['grid_y']))
         self.assertEqual([],after_delete['rooms'])
 
+    def test_nested_rooms_move_as_a_subtree_and_reject_cycles(self):
+        _, saved = self.put(f'/api/topology/layout?network_id={self.network}', {
+            'layout_id':None,'positions':[
+                {'device_id':self.ids[0],'grid_x':5,'grid_y':5},
+                {'device_id':self.ids[1],'grid_x':6,'grid_y':5},
+            ],
+        })
+        layout_id=saved['layout']['id']
+
+        def add_room(network_id,layout_id,name,x,y,width,height,parent=None):
+            status,result=self.post(f'/api/topology/rooms?network_id={network_id}',{
+                'layout_id':layout_id,'parent_room_id':parent,'name':name,
+                'grid_x':x,'grid_y':y,'grid_width':width,'grid_height':height,
+                'grid_cell_width':400,'grid_cell_height':360,
+            })
+            self.assertEqual(200,status,result)
+            return result['room']
+
+        root=add_room(self.network,layout_id,'Standort',0,0,20,20)
+        child=add_room(self.network,layout_id,'Etage',2,2,12,12,root['id'])
+        nested=add_room(self.network,layout_id,'Serverraum',4,4,6,6,child['id'])
+        target=add_room(self.network,layout_id,'Nebengebäude',30,30,20,20)
+        self.assertEqual(root['id'],child['parent_room_id'])
+        self.assertEqual(child['id'],nested['parent_room_id'])
+        connection=sqlite3.connect(self.path)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                'UPDATE topology_rooms SET parent_room_id=? WHERE id=?',
+                (nested['id'],root['id']),
+            )
+        connection.close()
+
+        _, manual=self.post(f'/api/topology/manual-nodes?network_id={self.network}',{
+            'layout_id':layout_id,'node_type':'switch','label':'Server Switch','grid_x':8,'grid_y':8,
+        })
+        _, obstacle=self.post(f'/api/topology/manual-nodes?network_id={self.network}',{
+            'layout_id':layout_id,'node_type':'generic','label':'Unassigned','grid_x':14,'grid_y':14,
+        })
+        for device_id in self.ids[:2]:
+            status,_=self.put(
+                f'/api/topology/rooms/assignment?network_id={self.network}&layout_id={layout_id}',
+                {'room_id':nested['id'],'device_id':device_id},
+            )
+            self.assertEqual(200,status)
+        status,_=self.put(
+            f'/api/topology/rooms/assignment?network_id={self.network}&layout_id={layout_id}',
+            {'room_id':nested['id'],'manual_node_id':manual['node']['id']},
+        )
+        self.assertEqual(200,status)
+
+        status,collision_layout=self.put(f'/api/topology/layout?network_id={self.network}',{
+            'layout_id':layout_id,'positions':[],
+            'manual_positions':[{'manual_node_id':obstacle['node']['id'],'grid_x':6,'grid_y':7}],
+        })
+        self.assertEqual(200,status,collision_layout)
+        status,collision=self.put(f"/api/topology/rooms/{root['id']}/geometry?network_id={self.network}",{
+            'grid_x':1,'grid_y':2,'grid_width':20,'grid_height':20,'move_contents':True,
+        })
+        self.assertEqual(409,status,collision)
+        unchanged=self.request(f'/api/topology/layout?network_id={self.network}')[1]
+        self.assertEqual((5,5),next((item['grid_x'],item['grid_y']) for item in unchanged['positions']
+            if item['device_id']==self.ids[0]))
+        self.assertEqual((0,0),next((room['grid_x'],room['grid_y']) for room in unchanged['rooms']
+            if room['id']==root['id']))
+        status,_=self.put(f'/api/topology/layout?network_id={self.network}',{
+            'layout_id':layout_id,'positions':[],
+            'manual_positions':[{'manual_node_id':obstacle['node']['id'],'grid_x':14,'grid_y':14}],
+        })
+        self.assertEqual(200,status)
+
+        status,moved=self.put(f"/api/topology/rooms/{root['id']}/geometry?network_id={self.network}",{
+            'grid_x':1,'grid_y':2,'grid_width':20,'grid_height':20,'move_contents':True,
+        })
+        self.assertEqual(200,status,moved)
+        rooms={room['id']:room for room in moved['rooms']}
+        self.assertEqual((3,4,root['id']),(
+            rooms[child['id']]['grid_x'],rooms[child['id']]['grid_y'],rooms[child['id']]['parent_room_id']))
+        self.assertEqual((5,6,child['id']),(
+            rooms[nested['id']]['grid_x'],rooms[nested['id']]['grid_y'],rooms[nested['id']]['parent_room_id']))
+        self.assertEqual((8,6),(
+            rooms[nested['id']]['connection_points']['top']['x'],
+            rooms[nested['id']]['connection_points']['top']['y']))
+        layout=self.request(f'/api/topology/layout?network_id={self.network}')[1]
+        positions={item['device_id']:(item['grid_x'],item['grid_y']) for item in layout['positions']}
+        self.assertEqual((6,7),positions[self.ids[0]])
+        self.assertEqual((7,7),positions[self.ids[1]])
+        manual_after=next(item for item in layout['manual_nodes'] if item['id']==manual['node']['id'])
+        self.assertEqual((9,10),(manual_after['grid_x'],manual_after['grid_y']))
+
+        status,resized=self.put(f"/api/topology/rooms/{root['id']}/geometry?network_id={self.network}",{
+            'grid_x':1,'grid_y':2,'grid_width':19,'grid_height':19,
+        })
+        self.assertEqual(200,status,resized)
+        rooms={room['id']:room for room in resized['rooms']}
+        self.assertEqual((3,4),(rooms[child['id']]['grid_x'],rooms[child['id']]['grid_y']))
+
+        status,cycle=self.put(f"/api/topology/rooms/{root['id']}/geometry?network_id={self.network}",{
+            'grid_x':5,'grid_y':6,'grid_width':20,'grid_height':20,
+            'parent_room_id':nested['id'],'move_contents':True,
+        })
+        self.assertEqual(409,status,cycle)
+        status,too_small=self.put(f"/api/topology/rooms/{root['id']}/geometry?network_id={self.network}",{
+            'grid_x':1,'grid_y':2,'grid_width':4,'grid_height':4,
+        })
+        self.assertEqual(409,status,too_small)
+        status,outside=self.put(f"/api/topology/rooms/{child['id']}/geometry?network_id={self.network}",{
+            'grid_x':3,'grid_y':4,'grid_width':22,'grid_height':12,
+        })
+        self.assertEqual(409,status,outside)
+
+        status,reparented=self.put(f"/api/topology/rooms/{child['id']}/geometry?network_id={self.network}",{
+            'grid_x':31,'grid_y':32,'grid_width':12,'grid_height':12,
+            'parent_room_id':target['id'],'move_contents':True,
+        })
+        self.assertEqual(200,status,reparented)
+        rooms={room['id']:room for room in reparented['rooms']}
+        self.assertEqual(target['id'],rooms[child['id']]['parent_room_id'])
+        self.assertEqual((33,34),(rooms[nested['id']]['grid_x'],rooms[nested['id']]['grid_y']))
+        layout=self.request(f'/api/topology/layout?network_id={self.network}')[1]
+        positions={item['device_id']:(item['grid_x'],item['grid_y']) for item in layout['positions']}
+        self.assertEqual((34,35),positions[self.ids[0]])
+
+        status,detached=self.put(f"/api/topology/rooms/{child['id']}/geometry?network_id={self.network}",{
+            'grid_x':31,'grid_y':32,'grid_width':12,'grid_height':12,'parent_room_id':None,
+        })
+        self.assertEqual(200,status,detached)
+        self.assertIsNone(next(room for room in detached['rooms'] if room['id']==child['id'])['parent_room_id'])
+
+        _, other_layout=self.put(f'/api/topology/layout?network_id={self.other_network}',{
+            'layout_id':None,'positions':[{'device_id':self.ids[2],'grid_x':0,'grid_y':0}],
+        })
+        foreign=add_room(self.other_network,other_layout['layout']['id'],'Fremdes Layout',0,0,5,5)
+        status,result=self.put(f"/api/topology/rooms/{child['id']}/geometry?network_id={self.network}",{
+            'grid_x':31,'grid_y':32,'grid_width':12,'grid_height':12,
+            'parent_room_id':foreign['id'],
+        })
+        self.assertEqual(404,status,result)
+
     def test_room_move_collision_rolls_back_all_members_and_geometry(self):
         network_url = f'/api/topology/layout?network_id={self.network}'
         _, saved = self.put(network_url, {'layout_id':None,'positions':[
@@ -660,7 +794,7 @@ class WebTest(unittest.TestCase):
             })
             connection.close()
 
-    def test_schema_v6_to_v7_adds_room_tables_without_changing_layouts(self):
+    def test_schema_v6_to_v8_adds_room_tables_without_changing_layouts(self):
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         device=self.ids[0]
@@ -684,11 +818,59 @@ class WebTest(unittest.TestCase):
             (layout,device),
         ).fetchone()
         self.assertEqual((-8,11),tuple(saved))
-        self.assertEqual(7,connection.execute('PRAGMA user_version').fetchone()[0])
+        self.assertEqual(8,connection.execute('PRAGMA user_version').fetchone()[0])
         self.assertEqual(3,connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
             "('topology_rooms','topology_room_devices','topology_room_manual_nodes')"
         ).fetchone()[0])
+        connection.close()
+
+    def test_schema_v7_to_v8_adds_parent_room_and_preserves_existing_links(self):
+        connection=sqlite3.connect(self.path)
+        connection.row_factory=sqlite3.Row
+        connection.execute(
+            "INSERT INTO topology_layouts(network_id,name,is_default) VALUES(?,'Hierarchy migration',0)",
+            (self.network,),
+        )
+        layout_id=connection.execute(
+            "SELECT id FROM topology_layouts WHERE name='Hierarchy migration'"
+        ).fetchone()['id']
+        for name,x in [('Legacy A',-3),('Legacy B',8)]:
+            connection.execute(
+                """INSERT INTO topology_rooms(layout_id,name,grid_x,grid_y,grid_width,grid_height)
+                   VALUES(?,?,?,0,4,4)""",(layout_id,name,x),
+            )
+        connection.execute(
+            """INSERT INTO topology_layout_links(
+                   layout_id,source_device_id,target_device_id,relation,properties_json
+               ) VALUES(?,?,?,'manual','{"cable":"fiber"}')""",
+            (layout_id,self.ids[0],self.ids[1]),
+        )
+        link_before=tuple(connection.execute(
+            'SELECT layout_id,source_device_id,target_device_id,relation,properties_json '
+            'FROM topology_layout_links WHERE layout_id=?',(layout_id,),
+        ).fetchone())
+        connection.execute('DROP TRIGGER topology_rooms_parent_validate_insert')
+        connection.execute('DROP TRIGGER topology_rooms_parent_validate_update')
+        connection.execute('DROP INDEX idx_topology_rooms_parent')
+        connection.execute('ALTER TABLE topology_rooms DROP COLUMN parent_room_id')
+        connection.execute('DELETE FROM schema_migrations WHERE version=8')
+        connection.execute('PRAGMA user_version=7')
+        connection.commit()
+
+        schema.initialize_database(connection)
+        schema.initialize_database(connection)
+        self.assertEqual(8,connection.execute('PRAGMA user_version').fetchone()[0])
+        rooms=connection.execute(
+            'SELECT name,parent_room_id FROM topology_rooms WHERE layout_id=? ORDER BY name',(layout_id,),
+        ).fetchall()
+        self.assertEqual([('Legacy A',None),('Legacy B',None)],[tuple(row) for row in rooms])
+        link_after=tuple(connection.execute(
+            'SELECT layout_id,source_device_id,target_device_id,relation,properties_json '
+            'FROM topology_layout_links WHERE layout_id=?',(layout_id,),
+        ).fetchone())
+        self.assertEqual(link_before,link_after)
+        self.assertEqual([],connection.execute('PRAGMA foreign_key_check').fetchall())
         connection.close()
 
     def test_api_startup_migrates_old_schema_and_keeps_a_verified_backup(self):
@@ -713,7 +895,7 @@ class WebTest(unittest.TestCase):
                          connection.execute('PRAGMA user_version').fetchone()[0])
         connection.close()
 
-        backup_pattern = self.path.name + '.pre-migration-v5-to-v7-*.bak'
+        backup_pattern = self.path.name + f'.pre-migration-v5-to-v{schema.SCHEMA_VERSION}-*.bak'
         backups = list(self.path.parent.glob(backup_pattern))
         self.assertEqual(1, len(backups))
         backup = sqlite3.connect(backups[0])
@@ -757,7 +939,7 @@ class WebTest(unittest.TestCase):
         ).fetchone())
         connection.close()
         self.assertEqual(1, len(list(self.path.parent.glob(
-            self.path.name + '.pre-migration-v5-to-v7-*.bak'))))
+            self.path.name + f'.pre-migration-v5-to-v{schema.SCHEMA_VERSION}-*.bak'))))
 
     def test_separate_views_and_navigation(self):
         for route, view in [('/', 'list'), ('/list', 'list'), ('/topology', 'topology'), ('/timeline', 'timeline')]:
@@ -775,7 +957,8 @@ class WebTest(unittest.TestCase):
                 self.assertIn('id="topology-room-tool"',html)
                 self.assertIn('id="topology-palette"', html)
                 self.assertIn('id="topology-context-menu"', html)
-                self.assertIn('id="topology-hidden-list"', html)
+                self.assertNotIn('Ausgeblendete Objekte', html)
+                self.assertNotIn('topology-hidden-list', html)
                 self.assertNotIn('id="topology-manual-create"', html)
                 self.assertNotIn('topology-edit-properties', html)
             self.assertNotIn('topology-compare', html)
@@ -805,7 +988,10 @@ class WebTest(unittest.TestCase):
                             'Ungültige Eingabe:'):
             self.assertIn(interaction,script)
         self.assertIn("const gripNames = ['nw','n','ne','e','se','s','sw','w']",script)
-        self.assertIn("topologyDropTargetAtPoint(node.x,node.y,hiddenSlots)",script)
+        self.assertIn("topologyDropTargetAtPoint(node.x,node.y,reservedSlots)",script)
+        self.assertNotIn('renderTopologyManualControls',script)
+        self.assertNotIn('Ausblenden',script)
+        self.assertIn('for (const manual of (data.layout?.manual_nodes || []))',script)
         self.assertIn('.sort((a,b) => a.bounds.width*a.bounds.height-b.bounds.width*b.bounds.height ||',script)
         self.assertIn("const TOPOLOGY_LABEL_REFERENCE = '333.333.333.333';",script)
         self.assertIn('const TOPOLOGY_HORIZONTAL_GAP = 5;',script)
@@ -858,19 +1044,26 @@ class WebTest(unittest.TestCase):
         self.assertNotIn('function editTopologyRoomAssignment(',script)
         self.assertNotIn('Inhalt beim Raumverschieben mitnehmen',script)
         self.assertIn('const nodes=topologyRenderedNodes.filter(node => node.manual',script)
-        self.assertIn('grid_height:movedRoom.grid_height,move_contents:true',script)
+        self.assertIn('parent_room_id:targetParentId,move_contents:true',script)
+        self.assertIn('topologyRoomParentForGridBounds(nextGeometry,state.subtreeIds)',script)
+        self.assertIn('for (const child of state.descendantRooms)',script)
+        self.assertIn('setTopologyRoomDropPreview(targetParent?.id ?? null)',script)
+        self.assertIn('parent_room_id:parentRoomId',script)
+        self.assertIn("!event.target.closest?.('.topology-room')",script)
         self.assertIn('syncTopologyRooms(result.rooms);',script)
         self.assertIn('function syncTopologyRooms(updatedRooms)',script)
         self.assertIn('return current ? Object.assign(current,updated) : updated;',script)
         self.assertIn('const currentRoom=topologyRooms.find(item => Number(item.id) === Number(room.id)) || room;',script)
-        self.assertIn('moveState={pointerId:event.pointerId,startPoint:point,nodes,room:currentRoom}',script)
+        self.assertIn('moveState={pointerId:event.pointerId,startPoint:point,nodes,room:currentRoom,',script)
+        self.assertIn('descendantRooms:descendants,subtreeIds',script)
         self.assertIn('setRoomShape(group,movedRoom,rect,label);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
-        self.assertIn('/static/topology.js?v=canvas-editor-10',template)
-        self.assertIn('/static/style.css?v=topology-editor-6',template)
+        self.assertIn('/static/topology.js?v=canvas-editor-12',template)
+        self.assertIn('/static/style.css?v=topology-editor-7',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
-        self.assertIn('.topology-viewport { width:100%; height:min(500px,70vh); min-height:280px; overflow:hidden;',style)
+        self.assertIn('.topology-viewport { width:100%; height:min(580px,78vh); min-height:280px; overflow:hidden;',style)
+        self.assertNotIn('.topology-hidden-panel',style)
         self.assertIn('.topology-viewport #topology-graph { display:block; width:100%; height:100%;',style)
         self.assertNotIn('.topology-viewport { width:100%; overflow:auto;',style)
         topology_html=(Path(__file__).parents[1]/'web/templates/topology.html').read_text()
