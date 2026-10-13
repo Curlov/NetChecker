@@ -340,7 +340,7 @@ class MigrationTest(unittest.TestCase):
         before = connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
         connection.execute('DROP TABLE schema_migrations'); connection.execute('PRAGMA user_version=3'); connection.commit()
         schema.initialize_database(connection)
-        self.assertEqual(4,connection.execute('PRAGMA user_version').fetchone()[0])
+        self.assertEqual(schema.SCHEMA_VERSION,connection.execute('PRAGMA user_version').fetchone()[0])
         self.assertEqual(device,connection.execute('SELECT id FROM devices').fetchone()[0])
         self.assertEqual(before,connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0])
         self.assertEqual([],connection.execute('PRAGMA foreign_key_check').fetchall())

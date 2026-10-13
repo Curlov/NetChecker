@@ -13,7 +13,6 @@ from database import (
     fail_scan_run,
     finish_scan_run,
     get_connection,
-    init_database,
     recover_interrupted_scan_runs,
     save_discovery_host,
     save_network,
@@ -41,6 +40,8 @@ from scanner import (
 
 from vendor import get_vendor_from_mac
 from local_host import enrich_local_host
+from runtime_config import DATABASE_PATH
+from startup_migrations import migrate_connection_for_startup
 
 # ==========================================================
 # Dauerbetrieb
@@ -755,7 +756,9 @@ def main():
         # ==================================================
 
         with inventory_lock():
-            init_database(connection)
+            migrate_connection_for_startup(
+                connection, DATABASE_PATH, component='scanner'
+            )
             recover_interrupted_scan_runs(connection)
 
 

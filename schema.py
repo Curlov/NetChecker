@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -822,7 +822,9 @@ REQUIRED_TABLES = {
     'topology_routeros_records', 'topology_segments', 'topology_interfaces',
     'topology_links', 'topology_policies', 'topology_endpoint_interfaces',
     'topology_identity_candidates', 'topology_device_hints',
-    'topology_classification_reconciliations',
+    'topology_classification_reconciliations', 'topology_layouts',
+    'topology_layout_positions', 'topology_manual_nodes', 'topology_layout_links',
+    'topology_rooms', 'topology_room_devices', 'topology_room_manual_nodes',
 }
 
 
@@ -1045,6 +1047,14 @@ def initialize_database(connection):
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            # Re-read after taking SQLite's writer reservation. Another
+            # process may have completed this migration while we were waiting.
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError("Database schema is newer than this NetChecker version")
+            if version == SCHEMA_VERSION:
+                validate_schema(connection)
+                return
             if version < 1:
                 _init_base_tables(connection)
             init_classification_tables(connection)
@@ -1070,6 +1080,217 @@ def initialize_database(connection):
                     ON observations(scan_run_id) WHERE observation_type='discovery_comparison';
                 """)
                 backfill_service_inventory(connection)
+            if version < 5:
+                execute_script(connection, """
+                CREATE TABLE IF NOT EXISTS topology_layouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    network_id INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'Standard'
+                        CHECK(length(trim(name)) > 0),
+                    is_default INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_default IN (0, 1)),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(network_id) REFERENCES networks(id)
+                        ON DELETE CASCADE,
+                    UNIQUE(network_id, name)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_topology_layouts_one_default
+                ON topology_layouts(network_id)
+                WHERE is_default = 1;
+
+                CREATE TABLE IF NOT EXISTS topology_layout_positions (
+                    layout_id INTEGER NOT NULL,
+                    device_id INTEGER NOT NULL,
+                    grid_x INTEGER NOT NULL CHECK(grid_x BETWEEN -1000000 AND 1000000),
+                    grid_y INTEGER NOT NULL CHECK(grid_y BETWEEN -1000000 AND 1000000),
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(layout_id, device_id),
+                    UNIQUE(layout_id, grid_x, grid_y),
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(device_id) REFERENCES devices(id)
+                        ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_topology_layout_positions_device
+                ON topology_layout_positions(device_id);
+                """)
+            if version < 6:
+                execute_script(connection, """
+                CREATE TABLE IF NOT EXISTS topology_manual_nodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    layout_id INTEGER NOT NULL,
+                    node_type TEXT NOT NULL CHECK(node_type IN (
+                        'switch','router','firewall','gateway','access_point',
+                        'patchpanel','network','internet','generic'
+                    )),
+                    label TEXT NOT NULL CHECK(length(trim(label)) BETWEEN 1 AND 120),
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    linked_device_id INTEGER,
+                    linked_network_id INTEGER,
+                    grid_x INTEGER NOT NULL CHECK(grid_x BETWEEN -1000000 AND 1000000),
+                    grid_y INTEGER NOT NULL CHECK(grid_y BETWEEN -1000000 AND 1000000),
+                    is_hidden INTEGER NOT NULL DEFAULT 0 CHECK(is_hidden IN (0,1)),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(linked_device_id) REFERENCES devices(id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(linked_network_id) REFERENCES networks(id)
+                        ON DELETE SET NULL,
+                    CHECK(node_type='network' OR linked_network_id IS NULL)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_topology_manual_nodes_layout
+                    ON topology_manual_nodes(layout_id, is_hidden, id);
+                CREATE INDEX IF NOT EXISTS idx_topology_manual_nodes_device
+                    ON topology_manual_nodes(linked_device_id);
+                CREATE INDEX IF NOT EXISTS idx_topology_manual_nodes_network
+                    ON topology_manual_nodes(linked_network_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_topology_manual_network_label
+                    ON topology_manual_nodes(layout_id, lower(label))
+                    WHERE node_type='network';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_topology_manual_linked_device
+                    ON topology_manual_nodes(layout_id, linked_device_id)
+                    WHERE linked_device_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_topology_manual_linked_network
+                    ON topology_manual_nodes(layout_id, linked_network_id)
+                    WHERE linked_network_id IS NOT NULL;
+
+                -- Reserved for later connection editing. Endpoints reference
+                -- either a scanned device or a manual node without introducing
+                -- fake scanner records or a polymorphic, unchecked ID.
+                CREATE TABLE IF NOT EXISTS topology_layout_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    layout_id INTEGER NOT NULL,
+                    source_device_id INTEGER,
+                    source_manual_node_id INTEGER,
+                    target_device_id INTEGER,
+                    target_manual_node_id INTEGER,
+                    relation TEXT NOT NULL DEFAULT 'manual',
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK((source_device_id IS NOT NULL) +
+                          (source_manual_node_id IS NOT NULL) = 1),
+                    CHECK((target_device_id IS NOT NULL) +
+                          (target_manual_node_id IS NOT NULL) = 1),
+                    CHECK(NOT (source_device_id IS NOT NULL AND
+                               target_device_id IS NOT NULL AND
+                               source_device_id=target_device_id)),
+                    CHECK(NOT (source_manual_node_id IS NOT NULL AND
+                               target_manual_node_id IS NOT NULL AND
+                               source_manual_node_id=target_manual_node_id)),
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(source_device_id) REFERENCES devices(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(source_manual_node_id) REFERENCES topology_manual_nodes(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_device_id) REFERENCES devices(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_manual_node_id) REFERENCES topology_manual_nodes(id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_layout_links_layout
+                    ON topology_layout_links(layout_id, id);
+                """)
+            if version < 7:
+                # Persist the canvas's cell size with the layout once rooms are
+                # introduced. NULL keeps existing layouts on their original
+                # device-count-based spacing until their first room is created.
+                layout_columns = {
+                    row[1] for row in connection.execute('PRAGMA table_info(topology_layouts)')
+                }
+                if 'grid_cell_width' not in layout_columns:
+                    connection.execute(
+                        "ALTER TABLE topology_layouts ADD COLUMN grid_cell_width INTEGER "
+                        "CHECK(grid_cell_width IS NULL OR grid_cell_width BETWEEN 1 AND 2000)"
+                    )
+                if 'grid_cell_height' not in layout_columns:
+                    connection.execute(
+                        "ALTER TABLE topology_layouts ADD COLUMN grid_cell_height INTEGER "
+                        "CHECK(grid_cell_height IS NULL OR grid_cell_height BETWEEN 1 AND 2000)"
+                    )
+                execute_script(connection, """
+                CREATE TABLE IF NOT EXISTS topology_rooms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    layout_id INTEGER NOT NULL,
+                    name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+                    description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),
+                    grid_x INTEGER NOT NULL CHECK(grid_x BETWEEN -1000000 AND 1000000),
+                    grid_y INTEGER NOT NULL CHECK(grid_y BETWEEN -1000000 AND 1000000),
+                    grid_width INTEGER NOT NULL CHECK(grid_width BETWEEN 2 AND 10000),
+                    grid_height INTEGER NOT NULL CHECK(grid_height BETWEEN 2 AND 10000),
+                    move_contents INTEGER NOT NULL DEFAULT 0 CHECK(move_contents IN (0,1)),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id) ON DELETE CASCADE,
+                    UNIQUE(id,layout_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_topology_rooms_layout_name
+                    ON topology_rooms(layout_id,lower(name));
+                CREATE INDEX IF NOT EXISTS idx_topology_rooms_layout
+                    ON topology_rooms(layout_id,id);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_topology_manual_nodes_id_layout
+                    ON topology_manual_nodes(id,layout_id);
+
+                CREATE TABLE IF NOT EXISTS topology_room_devices (
+                    layout_id INTEGER NOT NULL,
+                    room_id INTEGER NOT NULL,
+                    device_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(layout_id,device_id),
+                    FOREIGN KEY(room_id,layout_id) REFERENCES topology_rooms(id,layout_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id) ON DELETE CASCADE,
+                    FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_room_devices_room
+                    ON topology_room_devices(room_id,layout_id);
+
+                CREATE TABLE IF NOT EXISTS topology_room_manual_nodes (
+                    layout_id INTEGER NOT NULL,
+                    room_id INTEGER NOT NULL,
+                    manual_node_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(layout_id,manual_node_id),
+                    FOREIGN KEY(room_id,layout_id) REFERENCES topology_rooms(id,layout_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(layout_id) REFERENCES topology_layouts(id) ON DELETE CASCADE,
+                    FOREIGN KEY(manual_node_id,layout_id)
+                        REFERENCES topology_manual_nodes(id,layout_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_topology_room_manual_nodes_room
+                    ON topology_room_manual_nodes(room_id,layout_id);
+
+                CREATE TRIGGER IF NOT EXISTS topology_room_devices_validate_insert
+                BEFORE INSERT ON topology_room_devices
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM topology_layouts l
+                    JOIN addresses a ON a.network_id=l.network_id
+                    WHERE l.id=NEW.layout_id AND a.device_id=NEW.device_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT,'device does not belong to room layout network');
+                END;
+                CREATE TRIGGER IF NOT EXISTS topology_room_devices_validate_update
+                BEFORE UPDATE OF layout_id,device_id ON topology_room_devices
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM topology_layouts l
+                    JOIN addresses a ON a.network_id=l.network_id
+                    WHERE l.id=NEW.layout_id AND a.device_id=NEW.device_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT,'device does not belong to room layout network');
+                END;
+                """)
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

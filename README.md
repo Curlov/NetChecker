@@ -57,15 +57,28 @@ Filtererhalt und Detailaktualisierung gegen eine synthetische DOM-/API-Umgebung.
 
 ## Betriebsfreigabe und Migration
 
-Die Entwicklungsänderungen migrieren keine bereits laufende Installation.
-Ein neuer Scannerstart initialisiert/migriert das Schema, bevor Scans beginnen.
-Die API öffnet ausschließlich lesend; ohne passende Schema-Version liefert sie
-503. Vor Übernahme in den Betrieb ist eine freigegebene Sicherung und Migration
-erforderlich. Laufende alte Programmversionen dürfen während der Migration
-nicht weiter schreiben; ihre Prozesse übernehmen Änderungen nicht automatisch.
-Dienststopps, Neustarts und produktive Migrationen sind gesonderte Betriebsschritte.
+Beim normalen Start migrieren Scanner und API ein älteres Schema vor Beginn ihrer
+Arbeit. Die API nimmt erst nach erfolgreicher Migration und Schema-Prüfung
+Requests an; ein Update bleibt daher nicht allein wegen einer fehlenden Migration
+bei 503. Beide Startpfade verwenden dieselbe dateibasierte Inventarsperre wie die
+übrigen koordinierten Schreibvorgänge.
 
-Nur nach entsprechender Betriebsfreigabe:
+Vor einer Änderung an einer vorhandenen Datenbank erstellt NetChecker im selben
+Verzeichnis eine eindeutige Sicherung über die SQLite-Backup-API. Die Sicherung
+enthält bestätigte WAL-Daten, wird auf Integrität und Fremdschlüssel geprüft,
+mit Modus 0600 angelegt und niemals überschrieben. Danach läuft die
+Schemaänderung transaktional. Bei einem Fehler wird sie zurückgerollt, die
+Sicherung bleibt erhalten und der Prozess startet nicht mit einem unvollständigen
+Schema. Startprotokolle nennen Schema-Version, Komponente und Sicherungspfad.
+Sicherungen bleiben lokal liegen und müssen nach betrieblicher Prüfung manuell
+aufbewahrt oder entfernt werden.
+
+Die API öffnet ihre Datenbank zur Startmigration nur im vorhandenen
+Read-write-Modus (`mode=rw`): Ein fehlender oder falsch konfigurierter Pfad wird
+nicht stillschweigend als leere Datenbank neu angelegt. Die Requests selbst
+verwenden weiterhin schreibgeschützte Verbindungen, abgesehen von den
+ausdrücklichen Layout-Schreibendpunkten. Die manuelle Wartungsmigration bleibt
+für Offline- und Verwaltungsabläufe verfügbar:
 
 ```bash
 .venv/bin/python -B maintenance.py backup --database data/netchecker.db --out /sicherer/lokaler/pfad/inventar.db
@@ -159,6 +172,23 @@ aufgeklappter Details beim automatischen Aktualisieren erhalten. Die Auswahl
 eines anderen Ausgangs- oder Ziel-Snapshots beendet den bisherigen Vergleich.
 Die automatische Ansicht folgt dem neuesten abgeschlossenen Snapshot, bis ein
 historischer Snapshot ausdrücklich ausgewählt wird.
+
+Manuelle Topologieobjekte werden in Schema v6 getrennt vom Scannerinventar in
+`topology_manual_nodes` gespeichert. Sie erzeugen keine Einträge in `devices`,
+`networks` oder anderen Scan-Tabellen. `GET /api/topology/layout` liefert
+erkannte Gerätepositionen und manuelle Nodes gemeinsam; angelegt, bearbeitet und
+gelöscht werden manuelle Nodes über `POST /api/topology/manual-nodes`,
+`PUT /api/topology/manual-nodes/{id}` und `DELETE /api/topology/manual-nodes/{id}`.
+Positionsänderungen werden gemeinsam über `PUT /api/topology/layout` gespeichert.
+Die Oberfläche speichert Änderungen an Typ, Bezeichnung, Geräteverknüpfung und
+Eigenschaften automatisch. Ausgeblendete Nodes bleiben separat erhalten und
+können wieder eingeblendet werden.
+
+Netzwerkbezeichnungen werden als CIDR kanonisiert und mit einem passenden
+Netzwerkdatensatz im selben Bereich verknüpft. Eine mehrdeutige Zuordnung wird
+mit HTTP 409 abgewiesen. `topology_layout_links` enthält fremdschlüsselgesicherte
+Endpunkte für spätere Verbindungen zwischen erkannten und manuellen Nodes; dieser
+Arbeitsblock fügt noch keine Verbindungsbearbeitung hinzu.
 
 Die lokale Routentabelle und der vorhandene Neighbor-Cache werden ohne neue
 Netzwerkabfragen gelesen. RouterOS liest ausschließlich freigegebene Datensätze.

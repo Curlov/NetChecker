@@ -8,17 +8,33 @@
 
     <title>NetChecker</title>
 
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=topology-editor-6">
     <script src="/static/app.js" defer></script>
+    {% if view == "topology" %}<script src="/static/topology.js?v=canvas-editor-10" defer></script>{% endif %}
+    {% if view == "timeline" %}<script src="/static/timeline.js?v=timeline-compact-2" defer></script>{% endif %}
 </head>
-<body>
+<body data-view="{{ view }}">
 
 <header>
     <div>
         <h1>NetChecker</h1>
         <p>Netzwerküberwachung und Geräteanalyse</p>
     </div>
-    <span id="connection-status">Verbinde...</span>
+    <div class="header-actions">
+        <nav aria-label="Hauptnavigation">
+            {% for key, label, url in [("list", "Liste", "/list"), ("topology", "Topologie", "/topology"), ("timeline", "Timeline", "/timeline")] %}
+            <a href="{{ url }}" {% if view == key %}aria-current="page"{% endif %}>{{ label }}</a>
+            {% endfor %}
+        </nav>
+        <span id="connection-status" data-state="loading">
+            <span id="connection-icon" class="icon-text event-warning" aria-hidden="true">
+                <svg class="lucide-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <use href="/static/vendor/lucide/sprite.svg?v=1.55.0-devices-1#triangle-alert"></use>
+                </svg>
+            </span>
+            <span id="connection-message">Verbinde...</span>
+        </span>
+    </div>
 </header>
 
 <main>
@@ -34,6 +50,7 @@
             </select>
         </div>
 
+{% if view == "list" %}
         <div>
             <label for="search">Gerät suchen</label>
             <input id="search" type="search"
@@ -51,150 +68,13 @@
             </details>
         </div>
 
+{% endif %}
         <button id="refresh-button" type="button">
             Aktualisieren
         </button>
     </section>
 
-    <section class="stats">
-        <article>
-            <span>Geräteeinträge</span>
-            <strong id="device-count">0</strong>
-        </article>
-        <article>
-            <span>Erreichbar</span>
-            <strong id="present-count">0</strong>
-        </article>
-        <article>
-            <span>Unbekannter Typ</span>
-            <strong id="unknown-count">0</strong>
-        </article>
-    </section>
-
-    <section class="panel">
-        <div class="panel-heading">
-            <h2>Geräteübersicht</h2>
-            <span id="last-update">Noch nicht geladen</span>
-        </div>
-
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>IP-Adresse</th>
-                        <th>Hostname</th>
-                        <th>Hersteller</th>
-                        <th>Gerätetyp</th>
-                        <th>MAC-Adresse</th>
-                        <th>Status</th>
-                        <th>Konfidenz</th>
-                    </tr>
-                </thead>
-                <tbody id="device-table">
-                    <tr>
-                        <td colspan="7">
-                            Bitte Netzwerk auswählen.
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </section>
-
-   
-<section class="panel" id="detail-panel" hidden>
-    <div class="panel-heading">
-        <div>
-            <h2 id="detail-title">Gerätedetails</h2>
-            <span id="detail-subtitle"></span>
-        </div>
-        <button id="close-detail" type="button">
-            Schließen
-        </button>
-    </div>
-
-    <div class="detail-grid">
-        <article class="detail-card">
-            <h3>Geräteinformationen</h3>
-            <div id="detail-general"></div>
-        </article>
-
-        <article class="detail-card">
-            <h3>Klassifikation</h3>
-            <div id="detail-classification"></div>
-        </article>
-
-        <article class="detail-card">
-            <h3>Betriebssystem</h3>
-            <div id="detail-os-summary"></div>
-            <div id="detail-os"></div>
-        </article>
-        <article class="detail-card">
-            <h3>MAC-Analyse</h3>
-            <div id="detail-mac"></div>
-        </article>
-
-        <article class="detail-card detail-card-wide">
-            <h3>Netzwerkadressen</h3>
-            <div id="detail-addresses"></div>
-        </article>
-    </div>
-
-    <div class="detail-card">
-        <h3>Erkannte Ports und Dienste</h3>
-        <div id="detail-ports"></div>
-    </div>
-    <div class="detail-card">
-        <h3>Quellen und Evidenz zum Betriebssystem</h3>
-        <div id="detail-os-claims"></div>
-    </div>
-    <div class="detail-card">
-        <h3>Identitätszuordnung und Schnittstellen</h3>
-        <div id="detail-identity"></div>
-        <div id="detail-interfaces"></div>
-        <div id="detail-identity-candidates"></div>
-    </div>
-    <div class="detail-card">
-        <h3>Service-Beobachtungen</h3>
-        <div id="detail-port-history"></div>
-    </div>
-
-    <div class="detail-grid">
-        <article class="detail-card detail-card-wide">
-            <h3>Klassifikationshistorie</h3>
-            <div id="detail-history"></div>
-        </article>
-
-        <article class="detail-card detail-card-wide">
-            <h3>Erkannte Veränderungen</h3>
-            <div id="detail-changes"></div>
-        </article>
-    </div>
-
-    <div class="detail-card">
-        <h3>Topologiehinweise</h3>
-        <div id="detail-topology"></div>
-    </div>
-</section>
-
-<section class="panel" id="topology-panel">
-    <div class="panel-heading"><h2>Netzwerktopologie</h2><span id="topology-status"></span></div>
-    <p>Verbindungen zeigen gespeicherte Evidenz. ARP, DHCP und gelernte MAC-Adressen belegen keine direkte Verkabelung.</p>
-    <p>Geräte-Icons zeigen die aktuelle Geräteklasse. Grün: zuletzt erreichbar; Rot: als fehlend erkannt; Grau: Status unbekannt. Farben und Klassen beziehen sich auf den aktuellen Inventarstatus, auch bei älteren Snapshots.</p>
-    <div class="toolbar">
-        <div><label for="topology-snapshot">Ziel-Snapshot (danach)</label><select id="topology-snapshot"></select></div>
-        <div><label for="topology-before">Ausgangs-Snapshot (davor)</label><select id="topology-before"></select></div>
-        <button id="topology-compare" type="button">Vergleichen</button>
-        <button id="topology-reset" type="button">Ansicht zurücksetzen</button>
-    </div>
-    <p class="detail-empty">Hintergrund ziehen, um die gesamte Ansicht zu verschieben. Geräte rasten beim Loslassen im Raster ein; auf belegten Plätzen tauschen die Geräte ihre Position. Pfeiltasten bewegen Geräte um einen Rasterplatz. Mit dem Mausrad zoomen; Verbindung anklicken, um ihre Evidenz zu sehen.</p>
-    <div class="topology-viewport" role="region" aria-label="Scrollbare Netzwerktopologie" tabindex="0">
-        <svg id="topology-graph" role="img" aria-label="Topologie der gespeicherten Netzwerkbeobachtungen" viewBox="0 0 1000 500"></svg>
-    </div>
-    <pre id="topology-evidence" tabindex="0"></pre>
-    <div id="topology-diff"></div>
-    <h3>Beobachtete Segmente</h3><div id="topology-segments"></div>
-</section>
+    {% include view + ".html" %}
 
 </main>
 

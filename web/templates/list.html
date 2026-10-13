@@ -1,0 +1,117 @@
+    <section class="stats">
+        <article>
+            <span>Geräteeinträge</span>
+            <strong id="device-count">0</strong>
+        </article>
+        <article>
+            <span>Erreichbar</span>
+            <strong id="present-count">0</strong>
+        </article>
+        <article>
+            <span>Unbekannter Typ</span>
+            <strong id="unknown-count">0</strong>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-heading">
+            <h2>Geräteübersicht</h2>
+            <span id="last-update">Noch nicht geladen</span>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>IP-Adresse</th>
+                        <th>Hostname</th>
+                        <th>Hersteller</th>
+                        <th>Gerätetyp</th>
+                        <th>MAC-Adresse</th>
+                        <th>Status</th>
+                        <th>Konfidenz</th>
+                    </tr>
+                </thead>
+                <tbody id="device-table">
+                    <tr>
+                        <td colspan="7">
+                            Bitte Netzwerk auswählen.
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+   
+<section class="panel" id="detail-panel" hidden>
+    <div class="panel-heading">
+        <div>
+            <h2 id="detail-title">Gerätedetails</h2>
+            <span id="detail-subtitle"></span>
+        </div>
+        <button id="close-detail" type="button">
+            Schließen
+        </button>
+    </div>
+
+    <div class="detail-grid">
+        <article class="detail-card">
+            <h3>Geräteinformationen</h3>
+            <div id="detail-general"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Klassifikation</h3>
+            <div id="detail-classification"></div>
+        </article>
+
+        <article class="detail-card">
+            <h3>Betriebssystem</h3>
+            <div id="detail-os-summary"></div>
+            <div id="detail-os"></div>
+        </article>
+        <article class="detail-card">
+            <h3>MAC-Analyse</h3>
+            <div id="detail-mac"></div>
+        </article>
+
+        <article class="detail-card detail-card-wide">
+            <h3>Netzwerkadressen</h3>
+            <div id="detail-addresses"></div>
+        </article>
+    </div>
+
+    <div class="detail-card">
+        <h3>Erkannte Ports und Dienste</h3>
+        <div id="detail-ports"></div>
+    </div>
+    <article class="detail-card detail-card-wide">
+        <h3>Erkannte Veränderungen</h3>
+        <div id="detail-changes"></div>
+    </article>
+    <div class="detail-card">
+        <h3>Quellen und Evidenz zum Betriebssystem</h3>
+        <div id="detail-os-claims"></div>
+    </div>
+    <div class="detail-card">
+        <h3>Identitätszuordnung und Schnittstellen</h3>
+        <div id="detail-identity"></div>
+        <div id="detail-interfaces"></div>
+        <div id="detail-identity-candidates"></div>
+    </div>
+
+    <div class="detail-grid">
+        <article class="detail-card detail-card-wide">
+            <h3>Klassifikationshistorie</h3>
+            <div id="detail-history"></div>
+        </article>
+
+    </div>
+
+    <div class="detail-card">
+        <h3>Service-Beobachtungen</h3>
+        <div id="detail-port-history"></div>
+    </div>
+</section>
+

@@ -5,6 +5,8 @@
 // NetChecker – Weboberfläche
 // ==========================================================
 
+const activeView = document.body.dataset.view || "list";
+
 const networkSelect = document.querySelector("#network-select");
 const categorySelect = document.querySelector("#category-select");
 const searchInput = document.querySelector("#search");
@@ -334,6 +336,12 @@ function topologyPresenceDesign(presence) {
     return {tone:'unknown',label:'Erreichbarkeit unbekannt'};
 }
 
+function devicePresenceDesign(presence) {
+    if (presence === "present") return {tone:"positive", icon:"circle-check"};
+    if (presence === "missing") return {tone:"negative", icon:"circle-x"};
+    return {tone:"warning", icon:"triangle-alert"};
+}
+
 function createLucideIcon(name) {
     const icon = document.createElementNS('http://www.w3.org/2000/svg','svg');
     for (const [key,value] of Object.entries({class:'lucide-icon',viewBox:'0 0 24 24',
@@ -404,8 +412,16 @@ async function fetchJson(url) {
     return response.json();
 }
 
-function setConnectionStatus(message) {
-    connectionStatus.textContent = message;
+function setConnectionStatus(message, connected = null) {
+    const messageElement = document.querySelector("#connection-message");
+    const iconContainer = document.querySelector("#connection-icon");
+    const design = devicePresenceDesign(connected === true ? "present" :
+        connected === false ? "missing" : "unknown");
+    connectionStatus.dataset.state = connected === true ? "connected" :
+        connected === false ? "error" : "loading";
+    iconContainer.className = `icon-text event-${design.tone}`;
+    iconContainer.replaceChildren(createLucideIcon(design.icon));
+    messageElement.textContent = message;
 }
 
 
@@ -437,13 +453,12 @@ async function loadNetworks(preserveSelection = false) {
         networkSelect.value = preserveSelection && result.networks.some(n => String(n.id) === current)
             ? current : String(result.networks[0].id);
         if (previous && networkSelect.value !== previous) closeDeviceDetails();
-        await loadDevices();
-        await loadTopology();
+        await loadCurrentView();
     } else {
-        setConnectionStatus("Keine Netzwerke gespeichert");
+        setConnectionStatus("Keine Netzwerke gespeichert", true);
         devices = []; deviceTotal = 0; closeDeviceDetails();
-        renderDevices();
-        await loadTopology();
+        if (activeView === "list") renderDevices();
+        await loadCurrentView();
     }
 }
 
@@ -451,6 +466,12 @@ async function loadNetworks(preserveSelection = false) {
 // ==========================================================
 // Geräte laden
 // ==========================================================
+
+async function loadCurrentView() {
+    if (activeView === "topology") return loadTopology();
+    if (activeView === "timeline") return loadTimeline();
+    return loadDevices();
+}
 
 async function loadDevices() {
     const requestId = ++deviceRequestId;
@@ -504,6 +525,8 @@ async function loadDevices() {
         devices = allDevices;
         deviceTotal = total;
 
+        if (activeView === 'topology') return;
+
         updateCategories();
         renderDevices();
         if (selectedDeviceId !== null) {
@@ -514,7 +537,7 @@ async function loadDevices() {
             }
         }
 
-        setConnectionStatus("API verbunden");
+        setConnectionStatus("API verbunden", true);
 
         lastUpdate.textContent =
             "Aktualisiert: " +
@@ -523,7 +546,8 @@ async function loadDevices() {
     } catch (error) {
         if (requestId !== deviceRequestId) return;
 
-        setConnectionStatus("API-Fehler");
+        if (activeView === 'topology') throw error;
+        setConnectionStatus("API-Fehler", false);
         deviceTable.replaceChildren();
 
         addTableMessage(`Fehler: ${error.message}`);
@@ -591,7 +615,7 @@ function closeCategoryMenu(event) {
     }
 }
 
-document.querySelector('#category-menu').addEventListener('keydown',closeCategoryMenu);
+document.querySelector('#category-menu')?.addEventListener('keydown',closeCategoryMenu);
 
 
 // ==========================================================
@@ -698,7 +722,7 @@ function renderDevices() {
         row.cells[3].replaceChildren(iconText(displayValue(type),
             {tone:'info',icon:deviceClassDesign(device.category).icon}));
         row.cells[5].replaceChildren(iconText(displayValue(device.presence),
-            eventDesign(String(device.presence || 'unknown').toLowerCase())));
+            devicePresenceDesign(String(device.presence || 'unknown').toLowerCase())));
 
         // Markierung beim Neuaufbau wiederherstellen.
         if (String(device.id) === selectedDeviceId) {
@@ -1057,19 +1081,6 @@ async function showDevice(deviceId, scroll = true) {
         // Veränderungen lesbar statt als JSON
         renderChanges(data.changes);
 
-        // Topologie
-        renderDetailTable(
-            document.querySelector("#detail-topology"),
-            data.topology_hints,
-            [
-                ["category", "Kategorie"],
-                ["manufacturer", "Hersteller"],
-                ["model", "Modell"],
-                ["source", "Quelle"],
-                ["confidence", "Konfidenz"]
-            ]
-        );
-
     } catch (error) {
         if (requestId !== detailRequestId) return;
 
@@ -1086,6 +1097,7 @@ async function showDevice(deviceId, scroll = true) {
 function closeDeviceDetails() {
     ++detailRequestId;
 
+    if (!detailPanel) return;
     detailPanel.hidden = true;
 
     // Auswahl beim Schließen entfernen.
@@ -1101,423 +1113,36 @@ networkSelect.addEventListener("change", () => {
     devices = [];
     deviceTotal = 0;
 
-    renderDevices();
-    loadDevices();
-    ++topologyRequestId;
+    if (activeView === "list") renderDevices();
     topologyPinned = false;
-    document.querySelector('#topology-snapshot').replaceChildren();
-    loadTopology();
+    if (activeView !== "timeline") loadCurrentView();
 });
 
-searchInput.addEventListener("input", renderDevices);
-categorySelect.addEventListener("change", renderDevices);
+searchInput?.addEventListener("input", renderDevices);
+categorySelect?.addEventListener("change", renderDevices);
 
 document.querySelector("#refresh-button")
-    .addEventListener("click", loadDevices);
+    .addEventListener("click", loadCurrentView);
 
 document.querySelector("#close-detail")
-    .addEventListener("click", closeDeviceDetails);
+    ?.addEventListener("click", closeDeviceDetails);
 
 
 // ==========================================================
 // Automatische Aktualisierung
 // ==========================================================
 
-setInterval(() => loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`)), REFRESH_INTERVAL_MS);
+setInterval(() => loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false)), REFRESH_INTERVAL_MS);
 
 document.querySelector('#api-key').addEventListener('change', () => {
     closeDeviceDetails();
-    loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`));
+    loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false));
 });
-
-const svgNamespace = 'http://www.w3.org/2000/svg';
-function svgElement(name, attributes) {
-    const element = document.createElementNS(svgNamespace, name);
-    for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
-    return element;
-}
-
-async function loadTopology() {
-    const networkId = networkSelect.value;
-    const requestId = ++topologyRequestId;
-    const status = document.querySelector('#topology-status');
-    const select = document.querySelector('#topology-snapshot');
-    const beforeSelect = document.querySelector('#topology-before');
-    if (!networkId) {
-        select.replaceChildren(); beforeSelect.replaceChildren();
-        document.querySelector('#topology-graph').replaceChildren();
-        document.querySelector('#topology-segments').replaceChildren();
-        document.querySelector('#topology-diff').replaceChildren();
-        document.querySelector('#topology-evidence').textContent = '';
-        status.textContent = 'Kein Netzwerk ausgewählt';
-        return;
-    }
-    try {
-        const result = await fetchJson(`/api/topology/snapshots?network_id=${encodeURIComponent(networkId)}`);
-        if (requestId !== topologyRequestId || networkId !== networkSelect.value) return;
-        const previous = select.value;
-        const previousBefore = beforeSelect.value;
-        select.replaceChildren(); beforeSelect.replaceChildren();
-        const snapshots = result.snapshots.filter(s => ['complete','partial'].includes(s.status));
-        for (const snapshot of snapshots) {
-            const label = `#${snapshot.id} · ${formatEventTime(snapshot.created_at)} · ${snapshot.status}`;
-            select.add(new Option(label, String(snapshot.id)));
-            beforeSelect.add(new Option(label, String(snapshot.id)));
-        }
-        if (topologyPinned && snapshots.some(s => String(s.id) === previous)) select.value = previous;
-        if (snapshots.some(s => String(s.id) === previousBefore)) beforeSelect.value = previousBefore;
-        else if (snapshots.length > 1) beforeSelect.value = String(snapshots[1].id);
-        if (!snapshots.length) {
-            status.textContent = 'Noch keine abgeschlossenen Snapshots';
-            document.querySelector('#topology-graph').replaceChildren();
-            document.querySelector('#topology-segments').replaceChildren();
-            document.querySelector('#topology-evidence').textContent = '';
-            return;
-        }
-        await showTopology();
-    } catch (error) {
-        if (requestId !== topologyRequestId) return;
-        status.textContent = `Topologie: ${error.message}`;
-    }
-}
-
-let topologyDisplayedData = null;
-let topologyActiveComparison = null;
-
-function topologyComparisonMatches(networkId,snapshotId) {
-    return topologyActiveComparison && topologyActiveComparison.networkId === String(networkId) &&
-        String(topologyActiveComparison.data.after.id) === String(snapshotId) &&
-        String(topologyActiveComparison.data.before.id) === document.querySelector('#topology-before').value;
-}
-
-async function showTopology() {
-    const requestId = ++topologyRequestId;
-    const networkId = networkSelect.value;
-    const snapshotId = document.querySelector('#topology-snapshot').value;
-    if (!networkId || !snapshotId) return;
-    try {
-        const data = await fetchJson(`/api/topology?network_id=${encodeURIComponent(networkId)}&snapshot_id=${encodeURIComponent(snapshotId)}`);
-        if (requestId !== topologyRequestId || networkId !== networkSelect.value) return;
-        document.querySelector('#topology-status').textContent = `Snapshot #${data.snapshot.id} · ${data.snapshot.status}`;
-        document.querySelector('#topology-evidence').textContent = '';
-        const preserveComparison = topologyComparisonMatches(networkId,snapshotId);
-        if (!preserveComparison) {
-            topologyActiveComparison = null;
-            document.querySelector('#topology-diff').replaceChildren();
-        }
-        topologyDisplayedData = data;
-        renderDetailTable(document.querySelector('#topology-segments'), data.segments,
-            [['segment_name','Segment'], ['cidr','Netz'], ['segment_type','Art'], ['source','Quelle']]);
-        if (preserveComparison) renderTopologyComparisonGraph(topologyActiveComparison.data,data);
-        else renderTopologyGraph(data);
-    } catch (error) {
-        if (requestId === topologyRequestId) document.querySelector('#topology-status').textContent = error.message;
-    }
-}
-
-function renderTopologyGraph(data) {
-    const svg = document.querySelector('#topology-graph');
-    svg.replaceChildren();
-    const context = `${data.snapshot.network_id}:${data.snapshot.id}`;
-    if (context !== topologyGraphContext) {
-        stopTopologyPan();
-        topologyGraphContext = context; topologyPositions.clear();
-    }
-    const nodes = new Map();
-    // The selected snapshot describes connections; colors/classes describe the
-    // current inventory of the selected network, never historical scan evidence.
-    const currentDevices = new Map(devices.map(device => [String(device.id),device]));
-    const normalizeMac = mac => String(mac || '').replace(/[:-]/g,'').toLowerCase();
-    const deviceForNode = (id,mac) => {
-        if (id != null && currentDevices.has(String(id))) return currentDevices.get(String(id));
-        // Historical neighbor entries can lack a device ID. Only an unambiguous
-        // MAC match may supply current inventory metadata; never guess from IP.
-        const matches = mac ? devices.filter(device => normalizeMac(device.mac) === normalizeMac(mac)) : [];
-        return matches.length === 1 ? matches[0] : null;
-    };
-    const getNode = (id, ip, mac) => {
-        const key = id != null ? `device:${id}` : `endpoint:${mac || ip || 'unknown'}`;
-        if (!nodes.has(key)) nodes.set(key, {key, device:deviceForNode(id,mac),
-            label:ip || mac || `Gerät #${id}`});
-        else if (ip) nodes.get(key).label = ip;
-        if (!nodes.get(key).device) nodes.get(key).device = deviceForNode(id,mac);
-        return nodes.get(key);
-    };
-    const links = data.links.map(link => ({link,
-        a:getNode(link.source_device_id,link.source_ip,null),
-        b:getNode(link.target_device_id,link.target_ip,link.target_mac)}));
-    for (const neighbor of data.neighbors) getNode(neighbor.device_id,neighbor.ip,neighbor.mac);
-    const entries = [...nodes.values()];
-    const columns = Math.max(1, Math.ceil(Math.sqrt(entries.length * 2)));
-    const rows = Math.max(1, Math.ceil(entries.length / columns));
-    // Retain the compact original grid, with only a small spacing increment.
-    const columnSpacing = 820/Math.max(1,columns-1) + 14;
-    const rowSpacing = 380/Math.max(1,rows-1) + 8;
-    const graphWidth = Math.max(1000,180+(columns-1)*columnSpacing);
-    const graphHeight = Math.max(500,120+(rows-1)*rowSpacing);
-    const previousBase = topologyBaseViewBox;
-    topologyBaseViewBox = `0 0 ${graphWidth} ${graphHeight}`;
-    if (previousBase !== topologyBaseViewBox || !svg.getAttribute('viewBox') || topologyPositions.size === 0)
-        svg.setAttribute('viewBox',topologyBaseViewBox);
-    svg.style.width = `${graphWidth}px`;
-    svg.style.height = `${graphHeight}px`;
-    const occupiedSlots = new Set();
-    entries.forEach((node, index) => {
-        node.x = 90 + (index % columns)*columnSpacing;
-        node.y = 60 + Math.floor(index / columns)*rowSpacing;
-        const stored = topologyPositions.get(node.key);
-        if (stored) {node.x = stored.x; node.y = stored.y;}
-        // The grid extends in every direction. Preserve positions outside the
-        // initial layout on refresh instead of pulling devices back into it.
-        node.gridColumn = Math.round((node.x-90)/columnSpacing);
-        node.gridRow = Math.round((node.y-60)/rowSpacing);
-    });
-    // Existing positions take priority over newly added nodes.
-    for (const node of [...entries].sort((a,b) => Number(topologyPositions.has(b.key))-Number(topologyPositions.has(a.key)))) {
-        let slot = `${node.gridColumn}:${node.gridRow}`;
-        while (occupiedSlots.has(slot)) {
-            node.gridColumn++;
-            slot = `${node.gridColumn}:${node.gridRow}`;
-        }
-        occupiedSlots.add(slot);
-        node.x = 90+node.gridColumn*columnSpacing;
-        node.y = 60+node.gridRow*rowSpacing;
-    }
-    for (const edge of links) {
-        const line = svgElement('line', {class:`topology-link ${edge.link.relation === 'physical_neighbor' ? 'physical' : 'inferred'}${edge.link.comparison ? ` topology-comparison-${edge.link.comparison}` : ''}`, tabindex:0});
-        const title = svgElement('title', {});
-        title.textContent = `${edge.link.comparison ? topologyComparisonDesigns[edge.link.comparison].label + ' · ' : ''}${edge.link.relation} · ${edge.link.evidence_source} · ${edge.link.confidence}%`;
-        line.appendChild(title);
-        const inspect = () => {document.querySelector('#topology-evidence').textContent = JSON.stringify({...edge.link,
-            evidence:parseStoredValue(edge.link.evidence_json)}, null, 2);};
-        line.addEventListener('click', inspect);
-        line.addEventListener('keydown', event => {if (event.key === 'Enter') inspect();});
-        svg.appendChild(line); edge.element = line;
-    }
-    const redraw = () => {
-        for (const edge of links) {
-            for (const [key,value] of Object.entries({x1:edge.a.x,y1:edge.a.y,x2:edge.b.x,y2:edge.b.y})) edge.element.setAttribute(key,value);
-        }
-        for (const node of entries) {
-            node.element.setAttribute('transform',`translate(${node.x},${node.y})`);
-            topologyPositions.set(node.key,{x:node.x,y:node.y});
-        }
-    };
-    const snapNode = (node,original) => {
-        const column = Math.round((node.x-90)/columnSpacing);
-        const row = Math.round((node.y-60)/rowSpacing);
-        const x = 90+column*columnSpacing;
-        const y = 60+row*rowSpacing;
-        const occupant = entries.find(other => other !== node && Math.abs(other.x-x)<0.01 && Math.abs(other.y-y)<0.01);
-        // Dropping onto an occupied slot swaps the two devices.
-        if (occupant) {occupant.x=original.x; occupant.y=original.y;}
-        node.x=x; node.y=y; redraw();
-    };
-    for (const node of entries) {
-        const design = deviceClassDesign(node.device?.category);
-        const presence = topologyPresenceDesign(node.device?.presence);
-        const description = `${node.label} · ${design.label} · ${presence.label} · Aktueller Inventarstatus`;
-        const group = svgElement('g',{class:`topology-node topology-status-${presence.tone}`,tabindex:0,
-            'aria-label':description});
-        group.appendChild(svgElement('circle',{r:16,class:'topology-node-background'}));
-        const icon = createLucideIcon(design.icon);
-        for (const [key,value] of Object.entries({x:-9,y:-9,width:18,height:18})) icon.setAttribute(key,value);
-        group.appendChild(icon);
-        const label = svgElement('text',{x:0,y:32,'text-anchor':'middle'});
-        const fullLabel = String(node.label);
-        label.textContent = fullLabel.length > 48 ? fullLabel.slice(0,45) + '…' : fullLabel;
-        const title = svgElement('title',{}); title.textContent = description; group.appendChild(title);
-        const statusLabel = svgElement('text',{x:0,y:47,'text-anchor':'middle',class:'topology-status-label'});
-        statusLabel.textContent = presence.tone === 'present' ? 'Erreichbar' :
-            presence.tone === 'missing' ? 'Nicht erreichbar' : 'Status unbekannt';
-        group.appendChild(statusLabel);
-        group.appendChild(label); svg.appendChild(group); node.element = group;
-        let dragOrigin = null;
-        group.addEventListener('pointerdown', event => {
-            if (event.button !== 0) return;
-            dragOrigin = {x:node.x,y:node.y};
-            event.preventDefault(); event.stopPropagation(); group.setPointerCapture(event.pointerId);
-        });
-        group.addEventListener('pointermove', event => {
-            if (!group.hasPointerCapture(event.pointerId)) return;
-            const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
-            node.x = point.x; node.y = point.y; redraw();
-        });
-        const finishDrag = event => {
-            if (!dragOrigin) return;
-            snapNode(node,dragOrigin); dragOrigin=null;
-            if (group.hasPointerCapture(event.pointerId)) group.releasePointerCapture(event.pointerId);
-        };
-        group.addEventListener('pointerup',finishDrag);
-        group.addEventListener('pointercancel',finishDrag);
-        group.addEventListener('lostpointercapture',finishDrag);
-        group.addEventListener('keydown', event => {
-            const movement = {ArrowLeft:[-columnSpacing,0],ArrowRight:[columnSpacing,0],ArrowUp:[0,-rowSpacing],ArrowDown:[0,rowSpacing]}[event.key];
-            if (movement) {
-                event.preventDefault(); const original={x:node.x,y:node.y};
-                node.x += movement[0]; node.y += movement[1]; snapNode(node,original);
-            }
-        });
-    }
-    redraw();
-}
-
-document.querySelector('#topology-snapshot').addEventListener('change', () => {topologyActiveComparison = null; topologyPinned = true; showTopology();});
-function stopTopologyPan() {
-    if (!topologyPan) return;
-    const svg = document.querySelector('#topology-graph');
-    const pointerId = topologyPan.pointerId;
-    topologyPan = null;
-    svg.classList.remove('topology-panning');
-    if (svg.hasPointerCapture(pointerId)) svg.releasePointerCapture(pointerId);
-}
-
-const topologyGraph = document.querySelector('#topology-graph');
-topologyGraph.addEventListener('pointerdown', event => {
-    if (event.target !== topologyGraph || event.button !== 0 || topologyPan) return;
-    const matrix = topologyGraph.getScreenCTM();
-    if (!matrix) return;
-    event.preventDefault();
-    const inverse = matrix.inverse();
-    const start = new DOMPoint(event.clientX,event.clientY).matrixTransform(inverse);
-    const box = topologyGraph.viewBox.baseVal;
-    topologyPan = {pointerId:event.pointerId, inverse, start,
-        box:{x:box.x,y:box.y,width:box.width,height:box.height}};
-    topologyGraph.setPointerCapture(event.pointerId);
-    topologyGraph.classList.add('topology-panning');
-});
-topologyGraph.addEventListener('pointermove', event => {
-    if (!topologyPan || event.pointerId !== topologyPan.pointerId) return;
-    event.preventDefault();
-    const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(topologyPan.inverse);
-    const {box,start} = topologyPan;
-    topologyGraph.setAttribute('viewBox',`${box.x-(point.x-start.x)} ${box.y-(point.y-start.y)} ${box.width} ${box.height}`);
-});
-for (const eventName of ['pointerup','pointercancel','lostpointercapture']) {
-    topologyGraph.addEventListener(eventName, event => {
-        if (topologyPan?.pointerId === event.pointerId) stopTopologyPan();
-    });
-}
-document.querySelector('#topology-reset').addEventListener('click', () => {
-    stopTopologyPan(); topologyGraph.setAttribute('viewBox',topologyBaseViewBox);
-});
-document.querySelector('#topology-graph').addEventListener('wheel', event => {
-    event.preventDefault();
-    if (topologyPan) return;
-    const svg = event.currentTarget;
-    const box = svg.viewBox.baseVal;
-    const baseWidth = Number(topologyBaseViewBox.split(' ')[2]);
-    const width = Math.min(baseWidth*4,Math.max(250,box.width * (event.deltaY > 0 ? 1.1 : 0.9)));
-    const scale = width/box.width;
-    const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
-    svg.setAttribute('viewBox',`${point.x-(point.x-box.x)*scale} ${point.y-(point.y-box.y)*scale} ${width} ${box.height*scale}`);
-}, {passive:false});
-const topologyComparisonDesigns = {
-    added:{label:'Neue Beobachtung',tone:'positive',icon:'circle-plus'},
-    removed:{label:'Nicht erneut beobachtet',tone:'warning',icon:'triangle-alert'},
-    changed:{label:'Evidenz geändert',tone:'info',icon:'arrow-right-left'}
-};
-
-function topologyLinkKey(link) {
-    return JSON.stringify(['source_device_id','source_ip','source_interface','target_device_id',
-        'target_ip','target_mac','target_interface','relation','evidence_source'].map(key => link[key] ?? null));
-}
-
-function renderTopologyComparison(data,graphData) {
-    const container = document.querySelector('#topology-diff');
-    container.replaceChildren();
-    addDetailLine(container,'Vergleich',`${formatEventTime(data.before.created_at)} (#${data.before.id}) → ${formatEventTime(data.after.created_at)} (#${data.after.id})`);
-    addDetailLine(container,'Einordnung',data.interpretation);
-    for (const kind of ['added','removed','changed']) {
-        const design = topologyComparisonDesigns[kind];
-        const section = document.createElement('section');
-        section.className = 'topology-comparison-section';
-        const heading = document.createElement('h4');
-        heading.appendChild(iconText(`${design.label}: ${data[kind].length}`,design));
-        section.appendChild(heading);
-        for (const entry of data[kind]) {
-            const link = kind === 'changed' ? entry.after : entry;
-            const endpoint = side => {
-                const ip = link[`${side}_ip`];
-                const id = link[`${side}_device_id`];
-                const iface = link[`${side}_interface`];
-                return `${ip || (id != null ? `Gerät #${id}` : link[`${side}_mac`] || 'Unbekannt')}${iface ? ` (${iface})` : ''}`;
-            };
-            const details = document.createElement('details');
-            const summary = document.createElement('summary');
-            summary.appendChild(iconText(`${endpoint('source')} → ${endpoint('target')}`,design));
-            details.appendChild(summary);
-            const explanation = document.createElement('p');
-            explanation.textContent = kind === 'added' ? 'Diese Verbindungsevidenz ist im Ziel-Snapshot neu enthalten.' :
-                kind === 'removed' ? 'Diese Evidenz fehlt im Ziel-Snapshot. Das beweist keinen Verbindungsausfall.' :
-                `Quelle: ${link.evidence_source || 'unbekannt'}. Bewertung: ${entry.before.confidence ?? '–'} % → ${entry.after.confidence ?? '–'} %. Die vollständigen Belege stehen unten.`;
-            details.appendChild(explanation);
-            const raw = document.createElement('pre');
-            raw.textContent = JSON.stringify(entry,null,2);
-            details.appendChild(raw); section.appendChild(details);
-        }
-        container.appendChild(section);
-    }
-    if (!data.added.length && !data.removed.length && !data.changed.length)
-        addDetailLine(container,'Ergebnis','Keine Unterschiede in den gespeicherten Verbindungsbeobachtungen.');
-    addDetailLine(container,'Grafik','Grün: neue Beobachtung; Gelb gestrichelt: nicht erneut beobachtet; Blau: veränderte Evidenz. Gerätefarben zeigen weiterhin den aktuellen Inventarstatus.');
-    if (graphData) renderTopologyComparisonGraph(data,graphData);
-}
-
-function renderTopologyComparisonGraph(data,graphData) {
-    const marks = new Map([
-        ...data.added.map(link => [topologyLinkKey(link),'added']),
-        ...data.changed.map(entry => [topologyLinkKey(entry.after),'changed'])
-    ]);
-    renderTopologyGraph({...graphData,links:[
-        ...graphData.links.map(link => ({...link,comparison:marks.get(topologyLinkKey(link))})),
-        ...data.removed.map(link => ({...link,comparison:'removed'}))
-    ]});
-}
-
-function activateTopologyComparison(data,graphData) {
-    topologyActiveComparison = {networkId:String(networkSelect.value),data};
-    // A comparison concerns two fixed snapshots, so stop following newer ones.
-    topologyPinned = true;
-    renderTopologyComparison(data,graphData);
-}
-
-document.querySelector('#topology-before').addEventListener('change', () => {
-    ++topologyRequestId;
-    topologyActiveComparison = null;
-    document.querySelector('#topology-diff').replaceChildren();
-    if (topologyDisplayedData && String(topologyDisplayedData.snapshot.network_id) === networkSelect.value)
-        renderTopologyGraph(topologyDisplayedData);
-});
-
-document.querySelector('#topology-compare').addEventListener('click', async () => {
-    const networkId = networkSelect.value;
-    const before = document.querySelector('#topology-before').value;
-    const after = document.querySelector('#topology-snapshot').value;
-    if (!networkId || !before || !after) return;
-    if (before === after) {
-        topologyActiveComparison = null;
-        const container = document.querySelector('#topology-diff'); container.replaceChildren();
-        addDetailLine(container,'Vergleich','Bitte zwei unterschiedliche Snapshots auswählen.');
-        if (topologyDisplayedData && String(topologyDisplayedData.snapshot.network_id) === networkId)
-            renderTopologyGraph(topologyDisplayedData);
-        return;
-    }
-    const requestId = ++topologyRequestId;
-    try {
-        const data = await fetchJson(`/api/topology/compare?network_id=${encodeURIComponent(networkId)}&before=${encodeURIComponent(before)}&after=${encodeURIComponent(after)}`);
-        if (requestId !== topologyRequestId || networkId !== networkSelect.value) return;
-        const graphData = topologyDisplayedData && String(topologyDisplayedData.snapshot.network_id) === networkId &&
-            String(topologyDisplayedData.snapshot.id) === after ? topologyDisplayedData : null;
-        activateTopologyComparison(data,graphData);
-    } catch (error) {if (requestId === topologyRequestId) document.querySelector('#topology-status').textContent = error.message;}
-});
-
 
 // ==========================================================
 // Start
 // ==========================================================
 
-loadNetworks().catch(error => {
-    setConnectionStatus(`API-Fehler: ${error.message}`);
-});
+document.addEventListener("DOMContentLoaded", () => loadNetworks().catch(error => {
+    setConnectionStatus(`API-Fehler: ${error.message}`, false);
+}));
