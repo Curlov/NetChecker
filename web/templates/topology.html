@@ -1,12 +1,12 @@
 <section class="panel" id="topology-panel">
     <div class="panel-heading"><h2>Netzwerktopologie</h2><span id="topology-status"></span></div>
     <div class="toolbar">
-        <button id="topology-room-tool" type="button" aria-pressed="false" title="Rechteckige Räume auf dem Raster zeichnen">Raum zeichnen</button>
         <button id="topology-reset" type="button">Ansicht zentrieren</button>
         <span id="topology-save-status" class="topology-save-status" role="status" aria-live="polite">Layout noch nicht geladen</span>
     </div>
-    <p class="detail-empty topology-help">Objekte links auswählen und ziehen. Den freien Hintergrund zum Verschieben der Ansicht ziehen; Mausrad zoomt. Rechtsklick öffnet die Objektaktionen. Auf belegten Rasterplätzen tauschen bestehende Nodes weiterhin ihre Position.</p>
-    <div id="topology-palette" class="topology-palette" role="toolbar" aria-label="Objektpalette"></div>
+    <div id="topology-palette" class="topology-palette" role="toolbar" aria-label="Objektpalette">
+        <button id="topology-room-tool" class="topology-palette-item" type="button" aria-pressed="false" title="Rechteckige Räume auf dem Raster zeichnen">Raum zeichnen</button>
+    </div>
     <div class="topology-viewport" role="region" aria-label="Interaktive Netzwerktopologie" tabindex="0">
         <svg id="topology-graph" role="img" aria-label="Topologie der gespeicherten Netzwerkbeobachtungen" viewBox="0 0 1000 500"></svg>
     </div>
