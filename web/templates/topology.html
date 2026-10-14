@@ -7,6 +7,20 @@
     <div id="topology-palette" class="topology-palette" role="toolbar" aria-label="Objektpalette">
         <button id="topology-room-tool" class="topology-palette-item" type="button" aria-pressed="false" title="Rechteckige Räume auf dem Raster zeichnen">Raum zeichnen</button>
     </div>
+    <section id="topology-unplaced" class="topology-unplaced" aria-label="Nicht platzierte Geräte">
+        <div class="topology-unplaced-heading">
+            <button id="topology-unplaced-toggle" class="topology-unplaced-toggle" type="button"
+                aria-expanded="true" aria-controls="topology-unplaced-content">Nicht platzierte Geräte (0)</button>
+            <label class="topology-unplaced-search-label" for="topology-unplaced-search">Suche</label>
+            <input id="topology-unplaced-search" class="topology-unplaced-search" type="search"
+                placeholder="IP, Hostname oder Typ" autocomplete="off" aria-label="Nicht platzierte Geräte suchen">
+        </div>
+        <div id="topology-unplaced-content" class="topology-unplaced-content">
+            <div id="topology-unplaced-list" class="topology-unplaced-list" role="list"
+                aria-label="Nicht platzierte Geräte"></div>
+            <p id="topology-unplaced-empty" class="topology-unplaced-empty" hidden></p>
+        </div>
+    </section>
     <div class="topology-viewport" role="region" aria-label="Interaktive Netzwerktopologie" tabindex="0">
         <svg id="topology-graph" role="img" aria-label="Topologie der gespeicherten Netzwerkbeobachtungen" viewBox="0 0 1000 500"></svg>
     </div>

@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -1030,6 +1030,105 @@ def execute_script(connection, script):
     if statement.strip():
         connection.execute(statement)
 
+
+def migrate_room_minimum_height(connection):
+    """Allow one-row rooms while preserving IDs and room relationships."""
+    sequence = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name='topology_rooms'"
+    ).fetchone()
+    connection.execute("""
+        CREATE TABLE topology_rooms_min_height (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            layout_id INTEGER NOT NULL,
+            name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+            description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),
+            grid_x INTEGER NOT NULL CHECK(grid_x BETWEEN -1000000 AND 1000000),
+            grid_y INTEGER NOT NULL CHECK(grid_y BETWEEN -1000000 AND 1000000),
+            grid_width INTEGER NOT NULL CHECK(grid_width BETWEEN 2 AND 10000),
+            grid_height INTEGER NOT NULL CHECK(grid_height BETWEEN 1 AND 10000),
+            move_contents INTEGER NOT NULL DEFAULT 0 CHECK(move_contents IN (0,1)),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            parent_room_id INTEGER REFERENCES topology_rooms(id) ON DELETE SET NULL
+                CHECK(parent_room_id IS NULL OR parent_room_id != id),
+            FOREIGN KEY(layout_id) REFERENCES topology_layouts(id) ON DELETE CASCADE,
+            UNIQUE(id,layout_id)
+        )
+    """)
+    connection.execute("""
+        INSERT INTO topology_rooms_min_height(
+            id,layout_id,name,description,grid_x,grid_y,grid_width,grid_height,
+            move_contents,created_at,updated_at,parent_room_id
+        ) SELECT id,layout_id,name,description,grid_x,grid_y,grid_width,grid_height,
+                 move_contents,created_at,updated_at,parent_room_id
+          FROM topology_rooms
+    """)
+    connection.execute('DROP TABLE topology_rooms')
+    connection.execute('ALTER TABLE topology_rooms_min_height RENAME TO topology_rooms')
+    execute_script(connection, """
+        CREATE UNIQUE INDEX idx_topology_rooms_layout_name
+            ON topology_rooms(layout_id,lower(name));
+        CREATE INDEX idx_topology_rooms_layout
+            ON topology_rooms(layout_id,id);
+        CREATE INDEX idx_topology_rooms_parent
+            ON topology_rooms(layout_id,parent_room_id,id);
+
+        CREATE TRIGGER topology_rooms_parent_validate_insert
+        BEFORE INSERT ON topology_rooms
+        WHEN NEW.parent_room_id IS NOT NULL AND (
+            NOT EXISTS (
+                SELECT 1 FROM topology_rooms p
+                WHERE p.id=NEW.parent_room_id AND p.layout_id=NEW.layout_id
+            ) OR EXISTS (
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM topology_rooms WHERE parent_room_id=NEW.id
+                    UNION
+                    SELECT r.id FROM topology_rooms r
+                    JOIN descendants d ON r.parent_room_id=d.id
+                )
+                SELECT 1 FROM descendants WHERE id=NEW.parent_room_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT,'invalid parent room');
+        END;
+
+        CREATE TRIGGER topology_rooms_parent_validate_update
+        BEFORE UPDATE OF parent_room_id,layout_id ON topology_rooms
+        WHEN NEW.parent_room_id IS NOT NULL AND (
+            NOT EXISTS (
+                SELECT 1 FROM topology_rooms p
+                WHERE p.id=NEW.parent_room_id AND p.layout_id=NEW.layout_id
+            ) OR EXISTS (
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM topology_rooms WHERE parent_room_id=NEW.id
+                    UNION
+                    SELECT r.id FROM topology_rooms r
+                    JOIN descendants d ON r.parent_room_id=d.id
+                )
+                SELECT 1 FROM descendants WHERE id=NEW.parent_room_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT,'invalid parent room');
+        END;
+    """)
+    if sequence:
+        current = connection.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name='topology_rooms'"
+        ).fetchone()
+        if current:
+            connection.execute(
+                "UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='topology_rooms'",
+                (sequence['seq'] if hasattr(sequence, 'keys') else sequence[0],),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO sqlite_sequence(name,seq) VALUES('topology_rooms',?)",
+                (sequence['seq'] if hasattr(sequence, 'keys') else sequence[0],),
+            )
+
+
 def initialize_database(connection):
     if connection.in_transaction:
         raise RuntimeError("Schema setup requires a connection without pending writes")
@@ -1042,7 +1141,7 @@ def initialize_database(connection):
     foreign_keys = connection.execute('PRAGMA foreign_keys').fetchone()[0]
     # Foreign keys must be disabled outside the transaction for SQLite's
     # documented table rebuild procedure; integrity is checked before commit.
-    if version < 3:
+    if version < 10:
         connection.execute('PRAGMA foreign_keys=OFF')
     try:
         with connection:
@@ -1226,7 +1325,7 @@ def initialize_database(connection):
                     grid_x INTEGER NOT NULL CHECK(grid_x BETWEEN -1000000 AND 1000000),
                     grid_y INTEGER NOT NULL CHECK(grid_y BETWEEN -1000000 AND 1000000),
                     grid_width INTEGER NOT NULL CHECK(grid_width BETWEEN 2 AND 10000),
-                    grid_height INTEGER NOT NULL CHECK(grid_height BETWEEN 2 AND 10000),
+                    grid_height INTEGER NOT NULL CHECK(grid_height BETWEEN 1 AND 10000),
                     move_contents INTEGER NOT NULL DEFAULT 0 CHECK(move_contents IN (0,1)),
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1345,6 +1444,11 @@ def initialize_database(connection):
                     SELECT RAISE(ABORT,'invalid parent room');
                 END;
                 """)
+            # Rebuild rooms for the one-row minimum even when an earlier
+            # version 9 startup already advanced user_version without updating
+            # the existing table constraint.
+            if version < 10:
+                migrate_room_minimum_height(connection)
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

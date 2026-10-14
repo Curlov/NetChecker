@@ -98,7 +98,7 @@ class RoomCreate(BaseModel):
     grid_x: int = Field(..., ge=-1000000, le=1000000, strict=True)
     grid_y: int = Field(..., ge=-1000000, le=1000000, strict=True)
     grid_width: int = Field(..., ge=2, le=10000, strict=True)
-    grid_height: int = Field(..., ge=2, le=10000, strict=True)
+    grid_height: int = Field(..., ge=1, le=10000, strict=True)
     move_contents: bool = True
     grid_cell_width: int = Field(..., ge=1, le=2000, strict=True)
     grid_cell_height: int = Field(..., ge=1, le=2000, strict=True)
@@ -146,7 +146,7 @@ class RoomGeometry(BaseModel):
     grid_x: int = Field(..., ge=-1000000, le=1000000, strict=True)
     grid_y: int = Field(..., ge=-1000000, le=1000000, strict=True)
     grid_width: int = Field(..., ge=2, le=10000, strict=True)
-    grid_height: int = Field(..., ge=2, le=10000, strict=True)
+    grid_height: int = Field(..., ge=1, le=10000, strict=True)
     parent_room_id: int | None = Field(default=None, gt=0, strict=True)
     move_contents: bool | None = None
 
@@ -710,6 +710,52 @@ def save_layout(
         ).fetchone()
         response = layout_payload(db, network_id, layout)
     return response
+
+
+@router.delete('/layout/positions/{device_id}')
+def unplace_device(
+    device_id: int,
+    network_id: int = Query(..., ge=1),
+    layout_id: int | None = Query(default=None, ge=1),
+):
+    """Remove only a device's canvas placement and room membership."""
+    with get_write_connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        require_network(db, network_id)
+        belongs = db.execute(
+            'SELECT 1 FROM addresses WHERE network_id=? AND device_id=? LIMIT 1',
+            (network_id, device_id),
+        ).fetchone()
+        if belongs is None:
+            raise HTTPException(404, 'Gerät gehört nicht zum gewählten Netzwerk')
+        layout = _layout_for_network(db, network_id, layout_id)
+        linked = db.execute(
+            'SELECT id FROM topology_manual_nodes WHERE layout_id=? AND linked_device_id=?',
+            (layout['id'], device_id),
+        ).fetchone()
+        if linked is not None:
+            db.execute(
+                'UPDATE topology_manual_nodes SET linked_device_id=NULL,updated_at=CURRENT_TIMESTAMP '
+                'WHERE id=? AND layout_id=?',
+                (linked['id'],layout['id']),
+            )
+        db.execute(
+            'DELETE FROM topology_layout_positions WHERE layout_id=? AND device_id=?',
+            (layout['id'], device_id),
+        )
+        db.execute(
+            'DELETE FROM topology_room_devices WHERE layout_id=? AND device_id=?',
+            (layout['id'], device_id),
+        )
+        db.execute(
+            'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (layout['id'],),
+        )
+        layout = db.execute(
+            'SELECT * FROM topology_layouts WHERE id=?', (layout['id'],)
+        ).fetchone()
+        response = layout_payload(db, network_id, layout)
+    return {'deleted': True, **response}
 
 
 @router.get('/rooms')

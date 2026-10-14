@@ -171,6 +171,67 @@ class WebTest(unittest.TestCase):
             self.ids[0]:(6,-2), self.ids[1]:(5,-2)
         }, {row['device_id']:(row['grid_x'],row['grid_y']) for row in after_swap['positions']})
 
+    def test_unplacing_device_removes_only_its_layout_and_room_membership(self):
+        layout_url=f'/api/topology/layout?network_id={self.network}'
+        status,saved=self.put(layout_url,{'layout_id':None,'positions':[
+            {'device_id':self.ids[0],'grid_x':3,'grid_y':4},
+            {'device_id':self.ids[1],'grid_x':5,'grid_y':4},
+        ]})
+        self.assertEqual(200,status)
+        layout_id=saved['layout']['id']
+        connection=sqlite3.connect(self.path)
+        room_id=connection.execute(
+            "INSERT INTO topology_rooms(layout_id,name,grid_x,grid_y,grid_width,grid_height) "
+            "VALUES(?,'Test-Raum',0,0,10,8) RETURNING id",(layout_id,),
+        ).fetchone()[0]
+        connection.commit()
+        history_before=connection.execute(
+            'SELECT COUNT(*) FROM observations WHERE device_id=?',(self.ids[0],)
+        ).fetchone()[0]
+        connection.close()
+        status,assigned=self.put(layout_url,{'layout_id':layout_id,'positions':[],
+            'room_assignments':[{'device_id':self.ids[0],'room_id':room_id}]})
+        self.assertEqual(200,status)
+        self.assertEqual([self.ids[0]],assigned['rooms'][0]['device_ids'])
+
+        status,removed=self.delete(
+            f'/api/topology/layout/positions/{self.ids[0]}?network_id={self.network}&layout_id={layout_id}'
+        )
+        self.assertEqual(200,status)
+        self.assertTrue(removed['deleted'])
+        self.assertEqual({self.ids[1]},
+            {row['device_id'] for row in removed['positions']})
+        room=next(room for room in removed['rooms'] if room['id']==room_id)
+        self.assertEqual([],room['device_ids'])
+        self.assertEqual(200,self.request(f'/api/devices/{self.ids[0]}?network_id={self.network}')[0])
+
+        status,linked=self.post(f'/api/topology/manual-nodes?network_id={self.network}',{
+            'layout_id':layout_id,'node_type':'switch','label':'Verknüpfter Switch',
+            'linked_device_id':self.ids[1],'grid_x':7,'grid_y':5,
+        })
+        self.assertEqual(200,status)
+        manual_id=linked['node']['id']
+        status,unlinked=self.delete(
+            f'/api/topology/layout/positions/{self.ids[1]}?network_id={self.network}&layout_id={layout_id}'
+        )
+        self.assertEqual(200,status)
+        manual=next(item for item in unlinked['manual_nodes'] if item['id']==manual_id)
+        self.assertIsNone(manual['linked_device_id'])
+        self.assertEqual(200,self.request(f'/api/devices/{self.ids[1]}?network_id={self.network}')[0])
+
+        connection=sqlite3.connect(self.path)
+        self.assertEqual(2,connection.execute(
+            'SELECT COUNT(*) FROM addresses WHERE network_id=?',(self.network,)
+        ).fetchone()[0])
+        self.assertEqual(history_before,connection.execute(
+            'SELECT COUNT(*) FROM observations WHERE device_id=?',(self.ids[0],)
+        ).fetchone()[0])
+        self.assertEqual(0,connection.execute(
+            'SELECT COUNT(*) FROM topology_layout_positions WHERE layout_id=? AND device_id=?',
+            (layout_id,self.ids[1]),
+        ).fetchone()[0])
+        connection.close()
+
     def test_manual_nodes_create_edit_hide_show_and_delete_without_scanner_rows(self):
         layout_url = f'/api/topology/layout?network_id={self.network}'
         layout_status, saved = self.put(layout_url, {'layout_id':None,'positions':[
@@ -818,7 +879,7 @@ class WebTest(unittest.TestCase):
             (layout,device),
         ).fetchone()
         self.assertEqual((-8,11),tuple(saved))
-        self.assertEqual(8,connection.execute('PRAGMA user_version').fetchone()[0])
+        self.assertEqual(schema.SCHEMA_VERSION,connection.execute('PRAGMA user_version').fetchone()[0])
         self.assertEqual(3,connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
             "('topology_rooms','topology_room_devices','topology_room_manual_nodes')"
@@ -860,7 +921,7 @@ class WebTest(unittest.TestCase):
 
         schema.initialize_database(connection)
         schema.initialize_database(connection)
-        self.assertEqual(8,connection.execute('PRAGMA user_version').fetchone()[0])
+        self.assertEqual(schema.SCHEMA_VERSION,connection.execute('PRAGMA user_version').fetchone()[0])
         rooms=connection.execute(
             'SELECT name,parent_room_id FROM topology_rooms WHERE layout_id=? ORDER BY name',(layout_id,),
         ).fetchall()
@@ -956,11 +1017,18 @@ class WebTest(unittest.TestCase):
             if view == 'topology':
                 self.assertIn('id="topology-room-tool"',html)
                 self.assertIn('id="topology-palette"', html)
+                self.assertIn('id="topology-unplaced"',html)
+                self.assertIn('id="topology-unplaced-toggle"',html)
+                self.assertIn('id="topology-unplaced-search"',html)
                 palette_start=html.index('id="topology-palette"')
                 palette_end=html.index('</div>',palette_start)
                 room_tool=html.index('id="topology-room-tool"')
+                tray_start=html.index('id="topology-unplaced"')
+                canvas_start=html.index('class="topology-viewport"')
                 self.assertLess(palette_start,room_tool)
                 self.assertLess(room_tool,palette_end)
+                self.assertLess(palette_start,tray_start)
+                self.assertLess(tray_start,canvas_start)
                 self.assertNotIn('Objekte links auswählen',html)
                 self.assertIn('id="topology-context-menu"', html)
                 self.assertNotIn('Ausgeblendete Objekte', html)
@@ -986,6 +1054,14 @@ class WebTest(unittest.TestCase):
                             'showTopologyRoomPrompt', 'function clearTopologySelection()',
                             'function topologyDropTargetAtPoint(', 'function setTopologyRoomDropPreview(',
                             "topologyRoomAtCell(gridColumn,gridRow)",
+                            'function createTopologyNodeVisual(node)',
+                            'function renderTopologyUnplacedDevices()',
+                            'function topologyDeviceSearchText(device)',
+                            'function updateTopologyViewportHeight()',
+                            'function finishTopologyTrayDrag(event,cancelled=false)',
+                            "type:'device-tray-drag'", 'topologyUnplacedDevices=devices.filter',
+                            'placedDeviceIds.has(String(device.id))',
+                            "'DELETE'", 'layout/positions/',
                             "{room_id:room ? Number(room.id) : null,device_id:Number(item.device.id)}",
                             "{room_id:room ? Number(room.id) : null,manual_node_id:Number(item.manual.id)}",
                             "topologyToolMode = 'select'; updateTopologyRoomTool();",
@@ -997,7 +1073,7 @@ class WebTest(unittest.TestCase):
         self.assertIn("topologyDropTargetAtPoint(node.x,node.y,reservedSlots)",script)
         self.assertNotIn('renderTopologyManualControls',script)
         self.assertNotIn('Ausblenden',script)
-        self.assertIn('for (const manual of (data.layout?.manual_nodes || []))',script)
+        self.assertIn('for (const manual of manualNodes)',script)
         self.assertIn('.sort((a,b) => a.bounds.width*a.bounds.height-b.bounds.width*b.bounds.height ||',script)
         self.assertIn("const TOPOLOGY_LABEL_REFERENCE = '333.333.333.333';",script)
         self.assertIn('const TOPOLOGY_HORIZONTAL_GAP = 5;',script)
@@ -1019,7 +1095,7 @@ class WebTest(unittest.TestCase):
         self.assertIn('node.element.getBBox()',script)
         self.assertIn('row:nodeBounds.height+TOPOLOGY_VERTICAL_GAP,',script)
         self.assertIn('const box = bounds;',script)
-        self.assertIn('const roomExtents = topologyRooms.map(topologyRoomPixelBounds);',script)
+        self.assertIn('...rooms.map(room => {',script)
         self.assertIn('const {width,height}=topologyGridSizeToPixel(Number(room.grid_width),Number(room.grid_height));',script)
         self.assertIn('fitTopologyNodeLabel(label,room.name,Math.max(1,box.width-10));',script)
         self.assertNotIn('TOPOLOGY_ROOM_PADDING',script)
@@ -1027,7 +1103,7 @@ class WebTest(unittest.TestCase):
         self.assertIn('const contextChanged = context !== topologyGraphContext;',script)
         self.assertIn("const savedCamera=contextChanged ? readTopologyCamera(context) : null;",script)
         self.assertIn("if (savedCamera) svg.setAttribute('viewBox',savedCamera);",script)
-        self.assertIn("else if (!topologyCameraInitialized || !svg.getAttribute('viewBox'))",script)
+        self.assertIn("else if (contextChanged || !topologyCameraInitialized || !svg.getAttribute('viewBox'))",script)
         self.assertIn('const graphWidth=Math.max(paddedWidth,paddedHeight*aspect);',script)
         self.assertIn('const graphHeight=Math.max(paddedHeight,paddedWidth/aspect);',script)
         self.assertIn('const centerX=(contentLeft+contentRight)/2, centerY=(contentTop+contentBottom)/2;',script)
@@ -1064,13 +1140,22 @@ class WebTest(unittest.TestCase):
         self.assertIn('descendantRooms:descendants,subtreeIds',script)
         self.assertIn('setRoomShape(group,movedRoom,rect,label);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
-        self.assertIn('/static/topology.js?v=canvas-editor-12',template)
-        self.assertIn('/static/style.css?v=topology-editor-8',template)
+        self.assertIn('/static/topology.js?v=canvas-device-tray-1',template)
+        self.assertIn('/static/style.css?v=topology-device-tray-1',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
         self.assertNotIn('.topology-help',style)
-        self.assertIn('.topology-viewport { width:100%; height:min(580px,78vh); min-height:280px; overflow:hidden;',style)
+        self.assertIn('.topology-viewport { width:100%; height:480px; min-height:480px; overflow:hidden;',style)
         self.assertNotIn('.topology-hidden-panel',style)
+        self.assertIn('.topology-unplaced-list { display:flex; flex-wrap:wrap;',style)
+        self.assertIn('.topology-unplaced-content[hidden] { display:none; }',style)
+        self.assertNotIn('topology-unplaced-list { overflow',style)
+        self.assertIn("[device.ip,device.hostname,device.category,design.label]",script)
+        self.assertIn("topologyPresenceDesign(node.device.presence)",script)
+        self.assertIn("`Nicht platzierte Geräte (${topologyUnplacedDevices.length})`",script)
+        self.assertIn('window.innerHeight-24',script)
+        self.assertIn("window.addEventListener('resize',updateTopologyViewportHeight)",script)
+        self.assertNotIn('defaultPoint=topologyGridToPixel(index % columns',script)
         self.assertIn('.topology-viewport #topology-graph { display:block; width:100%; height:100%;',style)
         self.assertNotIn('.topology-viewport { width:100%; overflow:auto;',style)
         topology_html=(Path(__file__).parents[1]/'web/templates/topology.html').read_text()
