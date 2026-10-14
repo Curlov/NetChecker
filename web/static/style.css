@@ -370,7 +370,8 @@ tbody tr[data-device-id] {
 .change-details .change-note .icon-text { align-items:flex-start; }
 .change-details pre { margin:0; padding:10px; border:1px solid #334155; border-radius:6px;
     background:#111c30; color:#e2e8f0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:300px; overflow:auto; }
-.topology-viewport { width:100%; height:480px; min-height:480px; overflow:hidden; border:1px solid #475569;
+#topology-panel { box-sizing:border-box; display:flex; flex-direction:column; height:100vh; height:100dvh; }
+.topology-viewport { box-sizing:border-box; width:100%; flex:1 1 0; min-height:0; overflow:hidden; border:1px solid #475569;
     border-radius:6px; background:#0f172a; }
 .topology-viewport #topology-graph { display:block; width:100%; height:100%; border:0; min-width:0; max-width:none; cursor:grab; }
 .topology-viewport #topology-graph.topology-panning { cursor:grabbing; }

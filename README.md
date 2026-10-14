@@ -184,6 +184,10 @@ erkannte Gerätepositionen und manuelle Nodes gemeinsam; angelegt, bearbeitet un
 gelöscht werden manuelle Nodes über `POST /api/topology/manual-nodes`,
 `PUT /api/topology/manual-nodes/{id}` und `DELETE /api/topology/manual-nodes/{id}`.
 Positionsänderungen werden gemeinsam über `PUT /api/topology/layout` gespeichert.
+Beim Löschen eines Raums werden seine Unterräume und enthaltenen manuellen
+Objekte entfernt. Enthaltene Geräte verlieren ihre Canvas-Position und
+erscheinen wieder unter „Nicht platzierte Geräte“; betroffene Verbindungen
+werden entfernt. Scannerinformationen bleiben erhalten.
 Die Oberfläche speichert Änderungen an Typ, Bezeichnung, Geräteverknüpfung und
 Eigenschaften automatisch. Ausgeblendete Nodes bleiben separat erhalten und
 können wieder eingeblendet werden.

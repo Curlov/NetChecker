@@ -482,14 +482,6 @@ function renderTopologyUnplacedDevices() {
     empty.hidden=matching.length > 0;
     empty.textContent=topologyUnplacedDevices.length === 0
         ? 'Alle Geräte sind platziert.' : 'Keine Geräte entsprechen der Suche.';
-    updateTopologyViewportHeight();
-}
-
-function updateTopologyViewportHeight() {
-    const viewport=document.querySelector('.topology-viewport');
-    if (!viewport || typeof window === 'undefined') return;
-    const available=Math.floor(window.innerHeight-24);
-    viewport.style.height=`${Math.max(480,available)}px`;
 }
 
 async function loadTopology() {
@@ -719,7 +711,6 @@ function renderTopologyGraph(data) {
     });
     topologyUnplacedDevices=devices.filter(device => !placedDeviceIds.has(String(device.id)));
     renderTopologyUnplacedDevices();
-    updateTopologyViewportHeight();
     // Existing positions take priority over newly added nodes.
     for (const node of [...entries].sort((a,b) =>
         Number(topologyPositions.has(b.positionKey || b.key) || topologyPositions.has(b.key)) -
@@ -1826,10 +1817,14 @@ function openTopologyRoomContextMenu(x,y,room) {
         const result = await topologyManualRequest(`/api/topology/rooms/${room.id}/duplicate?network_id=${encodeURIComponent(networkSelect.value)}`,'POST');
         selectedRoomId = Number(result.room.id); setTopologySaveStatus('Raum dupliziert','saved'); await loadInventoryTopology();
     }),{secondary:true});
+    const deleteHint=document.createElement('p');
+    deleteHint.textContent='Unterräume und manuelle Objekte werden gelöscht; enthaltene Geräte erscheinen wieder unter „Nicht platzierte Geräte“.';
+    menu.appendChild(deleteHint);
     topologyMenuButton('Raum löschen',() => void runTopologyAction(async () => {
         await topologyManualRequest(`/api/topology/rooms/${room.id}?network_id=${encodeURIComponent(networkSelect.value)}`,'DELETE');
-        if (selectedRoomId === Number(room.id)) selectedRoomId = null;
-        setTopologySaveStatus('Raum gelöscht','saved'); await loadInventoryTopology();
+        selectedRoomId = null;
+        setTopologySaveStatus('Raum und Unterräume gelöscht · Geräte nicht platziert','saved');
+        await loadInventoryTopology();
     }),{danger:true});
     topologyMenuButton('Schließen',closeTopologyContextMenu,{secondary:true});
     placeTopologyMenu(x,y);
@@ -2526,7 +2521,6 @@ topologyUnplacedToggle.addEventListener('click',() => {
     renderTopologyUnplacedDevices();
 });
 topologyUnplacedSearch.addEventListener('input',renderTopologyUnplacedDevices);
-window.addEventListener('resize',updateTopologyViewportHeight);
 for (const [nodeType,design] of Object.entries(topologyManualTypes)) {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'topology-palette-item'; button.title = `${design.label} auf die Zeichenfläche ziehen`;

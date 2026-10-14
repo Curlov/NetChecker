@@ -1227,12 +1227,86 @@ def delete_room(room_id: int, network_id: int = Query(..., ge=1)):
         db.execute('BEGIN IMMEDIATE')
         require_network(db, network_id)
         room = _room_for_network(db, room_id, network_id)
+        room_ids = [item['id'] for item in _room_subtree(db, room_id, room['layout_id'])]
+        room_marks = ','.join('?' for _ in room_ids)
+        members = (room['layout_id'], *room_ids)
+        ancestor_ids = [row['id'] for row in db.execute(
+            """WITH RECURSIVE ancestors(id,parent_room_id) AS (
+                   SELECT id,parent_room_id FROM topology_rooms WHERE id=? AND layout_id=?
+                   UNION
+                   SELECT r.id,r.parent_room_id FROM topology_rooms r
+                   JOIN ancestors a ON r.id=a.parent_room_id WHERE r.layout_id=?
+               ) SELECT id FROM ancestors""",
+            (room_id,room['layout_id'],room['layout_id']),
+        )]
+        own_room_ids = sorted(set(room_ids) | set(ancestor_ids))
+        own_room_marks = ','.join('?' for _ in own_room_ids)
+        bounds = (room['grid_x'],room['grid_x']+room['grid_width'],
+                  room['grid_y'],room['grid_y']+room['grid_height'])
+        device_ids = {row['device_id'] for row in db.execute(
+            f"""SELECT device_id FROM topology_room_devices
+                WHERE layout_id=? AND room_id IN ({room_marks})""", members,
+        )}
+        device_ids.update(row['device_id'] for row in db.execute(
+            f"""SELECT p.device_id FROM topology_layout_positions p
+                LEFT JOIN topology_room_devices m
+                  ON m.layout_id=p.layout_id AND m.device_id=p.device_id
+                WHERE p.layout_id=? AND p.grid_x>=? AND p.grid_x<?
+                  AND p.grid_y>=? AND p.grid_y<?
+                  AND (m.room_id IS NULL OR m.room_id IN ({own_room_marks}))""",
+            (room['layout_id'],*bounds,*own_room_ids),
+        ))
+        manual_rows = {row['manual_node_id']:row['linked_device_id'] for row in db.execute(
+            f"""SELECT m.manual_node_id,n.linked_device_id
+                FROM topology_room_manual_nodes m
+                JOIN topology_manual_nodes n ON n.id=m.manual_node_id AND n.layout_id=m.layout_id
+                WHERE m.layout_id=? AND m.room_id IN ({room_marks})""", members,
+        )}
+        manual_rows.update((row['id'],row['linked_device_id']) for row in db.execute(
+            f"""SELECT n.id,n.linked_device_id FROM topology_manual_nodes n
+                LEFT JOIN topology_room_manual_nodes m
+                  ON m.layout_id=n.layout_id AND m.manual_node_id=n.id
+                WHERE n.layout_id=? AND n.grid_x>=? AND n.grid_x<?
+                  AND n.grid_y>=? AND n.grid_y<?
+                  AND (m.room_id IS NULL OR m.room_id IN ({own_room_marks}))""",
+            (room['layout_id'],*bounds,*own_room_ids),
+        ))
+        manual_ids = sorted(manual_rows)
+        device_ids.update(device_id for device_id in manual_rows.values() if device_id is not None)
+        if device_ids:
+            device_list = sorted(device_ids)
+            device_marks = ','.join('?' for _ in device_list)
+            devices = (room['layout_id'], *device_list)
+            db.execute(
+                f"""DELETE FROM topology_layout_links WHERE layout_id=?
+                    AND (source_device_id IN ({device_marks})
+                         OR target_device_id IN ({device_marks}))""",
+                (room['layout_id'], *device_list, *device_list),
+            )
+            db.execute(
+                f'DELETE FROM topology_layout_positions WHERE layout_id=? AND device_id IN ({device_marks})',
+                devices,
+            )
+            db.execute(
+                f'DELETE FROM topology_room_devices WHERE layout_id=? AND device_id IN ({device_marks})',
+                devices,
+            )
+            db.execute(
+                f"""UPDATE topology_manual_nodes SET linked_device_id=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                    WHERE layout_id=? AND linked_device_id IN ({device_marks})""",
+                devices,
+            )
+        if manual_ids:
+            manual_marks = ','.join('?' for _ in manual_ids)
+            db.execute(
+                f'DELETE FROM topology_manual_nodes WHERE layout_id=? AND id IN ({manual_marks})',
+                (room['layout_id'], *manual_ids),
+            )
         db.execute(
-            """UPDATE topology_rooms SET parent_room_id=NULL,updated_at=CURRENT_TIMESTAMP
-               WHERE parent_room_id=? AND layout_id=?""",
-            (room_id,room['layout_id']),
+            f'DELETE FROM topology_rooms WHERE layout_id=? AND id IN ({room_marks})',
+            members,
         )
-        db.execute('DELETE FROM topology_rooms WHERE id=?', (room_id,))
         db.execute('UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (room['layout_id'],))
         layout = db.execute('SELECT * FROM topology_layouts WHERE id=?', (room['layout_id'],)).fetchone()
         return layout_payload(db, network_id, layout)

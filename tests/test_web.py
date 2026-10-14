@@ -696,7 +696,8 @@ class WebTest(unittest.TestCase):
             f'/api/topology/rooms/{room_id}?network_id={self.network}'))
         self.assertEqual(200,status)
         after_delete = self.request(network_url)[1]
-        self.assertEqual((1,2),(after_delete['positions'][0]['grid_x'],after_delete['positions'][0]['grid_y']))
+        self.assertEqual([],after_delete['positions'])
+        self.assertEqual([],after_delete['manual_nodes'])
         self.assertEqual([],after_delete['rooms'])
 
     def test_nested_rooms_move_as_a_subtree_and_reject_cycles(self):
@@ -1307,7 +1308,6 @@ class WebTest(unittest.TestCase):
                             'function createTopologyNodeVisual(node)',
                             'function renderTopologyUnplacedDevices()',
                             'function topologyDeviceSearchText(device)',
-                            'function updateTopologyViewportHeight()',
                             'function finishTopologyTrayDrag(event,cancelled=false)',
                             "type:'device-tray-drag'", 'topologyUnplacedDevices=devices.filter',
                             'placedDeviceIds.has(String(device.id))',
@@ -1392,12 +1392,13 @@ class WebTest(unittest.TestCase):
         self.assertIn('descendantRooms:descendants,subtreeIds',script)
         self.assertIn('setRoomShape(group,movedRoom,rect,label);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
-        self.assertIn('/static/topology.js?v=interactive-links-21',template)
-        self.assertIn('/static/style.css?v=topology-links-7',template)
+        self.assertIn('/static/topology.js?v=interactive-links-24',template)
+        self.assertIn('/static/style.css?v=topology-links-10',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
         self.assertNotIn('.topology-help',style)
-        self.assertIn('.topology-viewport { width:100%; height:480px; min-height:480px; overflow:hidden;',style)
+        self.assertIn('#topology-panel { box-sizing:border-box; display:flex; flex-direction:column; height:100vh; height:100dvh; }',style)
+        self.assertIn('.topology-viewport { box-sizing:border-box; width:100%; flex:1 1 0; min-height:0; overflow:hidden;',style)
         self.assertNotIn('.topology-hidden-panel',style)
         self.assertIn('.topology-unplaced-list { display:flex; flex-wrap:wrap;',style)
         self.assertIn('.topology-unplaced-content[hidden] { display:none; }',style)
@@ -1405,8 +1406,7 @@ class WebTest(unittest.TestCase):
         self.assertIn("[device.ip,device.hostname,device.category,design.label]",script)
         self.assertIn("topologyPresenceDesign(node.device.presence)",script)
         self.assertIn("`Nicht platzierte Geräte (${topologyUnplacedDevices.length})`",script)
-        self.assertIn('window.innerHeight-24',script)
-        self.assertIn("window.addEventListener('resize',updateTopologyViewportHeight)",script)
+        self.assertNotIn('updateTopologyViewportHeight',script)
         self.assertNotIn('defaultPoint=topologyGridToPixel(index % columns',script)
         self.assertIn('.topology-viewport #topology-graph { display:block; width:100%; height:100%;',style)
         self.assertNotIn('.topology-viewport { width:100%; overflow:auto;',style)
@@ -1517,7 +1517,7 @@ class WebTest(unittest.TestCase):
         self.assertNotIn('connection-grip',node_bounds)
         self.assertIn('const measured=child.getBBox();',node_bounds)
         self.assertIn('topology-routing.js?v=geometry-a-star-12',template)
-        self.assertIn('/static/topology.js?v=interactive-links-21',template)
+        self.assertIn('/static/topology.js?v=interactive-links-24',template)
         self.assertIn("console.error(`Topologiefehler während „${loadPhase}“`,error)",script)
         self.assertIn("const apiFailure = loadPhase !== 'Topologie darstellen'",script)
         self.assertIn('const connectionPoints={top:points.n,right:points.e,bottom:points.s,left:points.w};',script)
