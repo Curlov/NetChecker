@@ -56,6 +56,8 @@ Bei vorhandenem Node.js prüft `node tests/frontend_harness.js` Auswahl,
 Filtererhalt und Detailaktualisierung gegen eine synthetische DOM-/API-Umgebung.
 `node tests/topology_routing_harness.js` prüft Orthogonalität, Hindernisvermeidung,
 Richtungswechsel und exakte Anschlüsse auch bei halben Rasterpositionen.
+`node tests/topology_resize_harness.js` prüft die Größenbegrenzung von Räumen
+an Geräten, manuellen Nodes und Unterräumen.
 
 ## Betriebsfreigabe und Migration
 

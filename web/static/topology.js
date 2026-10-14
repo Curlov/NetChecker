@@ -1665,29 +1665,28 @@ function topologyRoomResizeLimits(room) {
             const overlaps=bounds.right >= roomBounds.x && bounds.left <= roomBounds.right &&
                 bounds.bottom >= roomBounds.y && bounds.top <= roomBounds.bottom;
             return assignedToSubtree || (!assignedRooms?.size && overlaps);
-        }).map(item => item.bounds);
+        }).map(({node}) => {
+            const cell=Number.isInteger(node.gridColumn) && Number.isInteger(node.gridRow)
+                ? {gridColumn:node.gridColumn,gridRow:node.gridRow}
+                : topologyPixelToGrid(node.x,node.y,{nodeAnchor:true});
+            // Text glyph bounds vary slightly. A ceil on pixels can otherwise
+            // jump the resize limit one whole cell beyond the device.
+            return {left:cell.gridColumn,right:cell.gridColumn+1,
+                top:cell.gridRow,bottom:cell.gridRow+1};
+        });
     for (const child of topologyRooms) {
         if (!descendantIds.has(Number(child.id))) continue;
-        const bounds=topologyRoomPixelBounds(child);
-        objects.push({left:bounds.x,right:bounds.right,
-            top:bounds.y-TOPOLOGY_ROOM_TITLE_HEIGHT,bottom:bounds.bottom});
+        const left=Number(child.grid_x),top=Number(child.grid_y);
+        objects.push({left:left-1,right:left+Number(child.grid_width)+1,
+            top:top-1,bottom:top+Number(child.grid_height)+1});
     }
 
     if (!objects.length) return {left:null,right:null,top:null,bottom:null};
-    const boundaryGrid=(pixel,origin,spacing) => (pixel-origin)/spacing+0.5;
-    const boundaryBeforeContent=(pixels,gap,origin,spacing) => Math.floor(
-        boundaryGrid(Math.min(...pixels)-gap,origin,spacing)+1e-9);
-    const boundaryAfterContent=(pixels,gap,origin,spacing) => Math.ceil(
-        boundaryGrid(Math.max(...pixels)+gap,origin,spacing)-1e-9);
     return {
-        left:boundaryBeforeContent(objects.map(bounds => bounds.left),TOPOLOGY_HORIZONTAL_GAP/2,
-            TOPOLOGY_GRID_ORIGIN.x,topologyGridSpacing.column),
-        right:boundaryAfterContent(objects.map(bounds => bounds.right),TOPOLOGY_HORIZONTAL_GAP/2,
-            TOPOLOGY_GRID_ORIGIN.x,topologyGridSpacing.column),
-        top:boundaryBeforeContent(objects.map(bounds => bounds.top),TOPOLOGY_VERTICAL_GAP/2,
-            TOPOLOGY_GRID_ORIGIN.y,topologyGridSpacing.row),
-        bottom:boundaryAfterContent(objects.map(bounds => bounds.bottom),TOPOLOGY_VERTICAL_GAP/2,
-            TOPOLOGY_GRID_ORIGIN.y,topologyGridSpacing.row)
+        left:Math.min(...objects.map(bounds => bounds.left)),
+        right:Math.max(...objects.map(bounds => bounds.right)),
+        top:Math.min(...objects.map(bounds => bounds.top)),
+        bottom:Math.max(...objects.map(bounds => bounds.bottom))
     };
 }
 
