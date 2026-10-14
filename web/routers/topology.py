@@ -14,6 +14,8 @@ ManualNodeType = Literal[
     'switch', 'router', 'firewall', 'gateway', 'access_point',
     'patchpanel', 'network', 'internet', 'generic',
 ]
+TopologyLinkType = Literal['ethernet', 'fiber', 'wifi', 'logical', 'unknown']
+TopologyLinkAnchor = Literal['top', 'right', 'bottom', 'left', 'auto']
 
 
 class LayoutPosition(BaseModel):
@@ -216,9 +218,159 @@ class ManualNodeUpdate(BaseModel):
         extra = 'forbid'
 
 
+class TopologyLinkEndpoint(BaseModel):
+    device_id: int | None = Field(default=None, gt=0, strict=True)
+    manual_node_id: int | None = Field(default=None, gt=0, strict=True)
+    room_id: int | None = Field(default=None, gt=0, strict=True)
+    anchor: TopologyLinkAnchor
+
+    @root_validator(skip_on_failure=True)
+    def validate_endpoint_ref(cls, values):
+        if sum(values.get(field) is not None for field in
+               ('device_id', 'manual_node_id', 'room_id')) != 1:
+            raise ValueError('Genau eine Geräte-, manuelle Node- oder Raum-ID ist erforderlich')
+        if values.get('room_id') is not None and values.get('anchor') == 'auto':
+            raise ValueError('Raumverbindungen benötigen einen Anschluss an einer Raumkante')
+        return values
+
+    class Config:
+        extra = 'forbid'
+
+
+class TopologyLinkCreate(BaseModel):
+    layout_id: int = Field(..., gt=0, strict=True)
+    source: TopologyLinkEndpoint
+    target: TopologyLinkEndpoint
+    link_type: TopologyLinkType = 'unknown'
+    label: str = Field(default='', max_length=120, strict=True)
+    description: str = Field(default='', max_length=2000, strict=True)
+
+    @validator('label')
+    def normalize_link_label(cls, value):
+        return value.strip()
+
+    class Config:
+        extra = 'forbid'
+
+
+class TopologyLinkUpdate(BaseModel):
+    link_type: TopologyLinkType | None = None
+    label: str | None = Field(default=None, max_length=120, strict=True)
+    description: str | None = Field(default=None, max_length=2000, strict=True)
+
+    @validator('label')
+    def normalize_link_label(cls, value):
+        return value.strip() if value is not None else value
+
+    class Config:
+        extra = 'forbid'
+
+
+def _topology_link_payload(row):
+    item = dict(row)
+    source = {'anchor': item['source_anchor']}
+    target = {'anchor': item['target_anchor']}
+    for field in ('device_id', 'manual_node_id', 'room_id'):
+        source_id = item.get(f'source_{field}')
+        target_id = item.get(f'target_{field}')
+        if source_id is not None:
+            source[field] = source_id
+        if target_id is not None:
+            target[field] = target_id
+    return {
+        'id': item['id'], 'layout_id': item['layout_id'],
+        'source': source, 'target': target,
+        'link_type': item['link_type'], 'label': item['label'],
+        'description': item['description'], 'evidence_status': item['evidence_status'],
+        'waypoints': json.loads(item.get('waypoints_json') or '[]'),
+        'created_at': item.get('created_at'), 'updated_at': item.get('updated_at'),
+    }
+
+
+def _link_endpoint_columns(endpoint, side):
+    return {
+        f'{side}_device_id': endpoint.device_id,
+        f'{side}_manual_node_id': endpoint.manual_node_id,
+        f'{side}_room_id': endpoint.room_id,
+        f'{side}_anchor': endpoint.anchor,
+    }
+
+
+def _link_endpoint_identity(db, layout_id, endpoint):
+    if endpoint.device_id is not None:
+        return ('device', endpoint.device_id)
+    if endpoint.manual_node_id is not None:
+        row = db.execute(
+            'SELECT linked_device_id FROM topology_manual_nodes WHERE id=? AND layout_id=?',
+            (endpoint.manual_node_id, layout_id),
+        ).fetchone()
+        return ('device', row['linked_device_id']) if row and row['linked_device_id'] is not None \
+            else ('manual', endpoint.manual_node_id)
+    return ('room', endpoint.room_id)
+
+
+def _validate_link_endpoint(db, network_id, layout_id, endpoint):
+    if endpoint.device_id is not None:
+        if not db.execute(
+            'SELECT 1 FROM addresses WHERE network_id=? AND device_id=? LIMIT 1',
+            (network_id, endpoint.device_id),
+        ).fetchone():
+            raise HTTPException(404, 'Geräteendpunkt gehört nicht zum gewählten Netzwerk')
+        placed = db.execute(
+            """SELECT 1 FROM topology_layout_positions
+               WHERE layout_id=? AND device_id=?
+               UNION ALL
+               SELECT 1 FROM topology_manual_nodes
+               WHERE layout_id=? AND linked_device_id=? LIMIT 1""",
+            (layout_id, endpoint.device_id, layout_id, endpoint.device_id),
+        ).fetchone()
+        if not placed:
+            raise HTTPException(409, 'Nur platzierte Geräte können verbunden werden')
+    elif endpoint.manual_node_id is not None:
+        if not db.execute(
+            'SELECT 1 FROM topology_manual_nodes WHERE id=? AND layout_id=?',
+            (endpoint.manual_node_id, layout_id),
+        ).fetchone():
+            raise HTTPException(404, 'Manueller Endpunkt gehört nicht zu diesem Layout')
+    elif not db.execute(
+        'SELECT 1 FROM topology_rooms WHERE id=? AND layout_id=?',
+        (endpoint.room_id, layout_id),
+    ).fetchone():
+        raise HTTPException(404, 'Raumendpunkt gehört nicht zu diesem Layout')
+
+
+def _validate_topology_link(db, layout_id, source, target, *, exclude_link_id=None):
+    source_identity = _link_endpoint_identity(db, layout_id, source)
+    target_identity = _link_endpoint_identity(db, layout_id, target)
+    if source_identity == target_identity:
+        raise HTTPException(422, 'Eine Verbindung benötigt zwei verschiedene Endpunkte')
+    rows = db.execute(
+        'SELECT * FROM topology_layout_links WHERE layout_id=?', (layout_id,),
+    ).fetchall()
+    for row in rows:
+        if exclude_link_id is not None and row['id'] == exclude_link_id:
+            continue
+        old_source = TopologyLinkEndpoint(
+            device_id=row['source_device_id'],
+            manual_node_id=row['source_manual_node_id'],
+            room_id=row['source_room_id'], anchor=row['source_anchor'],
+        )
+        old_target = TopologyLinkEndpoint(
+            device_id=row['target_device_id'],
+            manual_node_id=row['target_manual_node_id'],
+            room_id=row['target_room_id'], anchor=row['target_anchor'],
+        )
+        old_source_identity = _link_endpoint_identity(db, layout_id, old_source)
+        old_target_identity = _link_endpoint_identity(db, layout_id, old_target)
+        if ((source_identity, target_identity) == (old_source_identity, old_target_identity) or
+                (source_identity, target_identity) == (old_target_identity, old_source_identity)):
+            raise HTTPException(409, 'Diese Verbindung zwischen den Objekten existiert bereits')
+
+
 def layout_payload(db, network_id, layout):
     if layout is None:
-        return {'layout': None, 'positions': [], 'manual_nodes': [], 'rooms': [], 'saved': False}
+        return {'layout': None, 'positions': [], 'manual_nodes': [], 'rooms': [],
+                'links': [], 'saved': False}
     positions = db.execute(
         """SELECT p.device_id, p.grid_x, p.grid_y, p.updated_at
            FROM topology_layout_positions p
@@ -263,6 +415,9 @@ def layout_payload(db, network_id, layout):
         'SELECT room_id,manual_node_id FROM topology_room_manual_nodes '
         'WHERE layout_id=? ORDER BY manual_node_id', (layout['id'],),
     ).fetchall()
+    links = [_topology_link_payload(row) for row in db.execute(
+        'SELECT * FROM topology_layout_links WHERE layout_id=? ORDER BY id', (layout['id'],),
+    )]
     by_room = {room['id']: room for room in rooms}
     for room in rooms:
         room['move_contents'] = bool(room['move_contents'])
@@ -285,6 +440,7 @@ def layout_payload(db, network_id, layout):
         'positions': [dict(row) for row in positions],
         'manual_nodes': manual_nodes,
         'rooms': rooms,
+        'links': links,
         'saved': True,
     }
 
@@ -739,6 +895,11 @@ def unplace_device(
                 'WHERE id=? AND layout_id=?',
                 (linked['id'],layout['id']),
             )
+        db.execute(
+            """DELETE FROM topology_layout_links WHERE layout_id=?
+               AND (source_device_id=? OR target_device_id=?)""",
+            (layout['id'],device_id,device_id),
+        )
         db.execute(
             'DELETE FROM topology_layout_positions WHERE layout_id=? AND device_id=?',
             (layout['id'], device_id),
@@ -1236,6 +1397,145 @@ def delete_manual_node(
             (node['layout_id'],),
         )
     return {'deleted':True,'id':manual_node_id}
+
+
+@router.get('/links')
+def get_layout_links(
+    network_id: int = Query(..., ge=1),
+    layout_id: int | None = Query(default=None, ge=1),
+):
+    """Load only the explicitly documented links belonging to a layout."""
+    with get_connection() as db:
+        require_network(db, network_id)
+        if layout_id is None:
+            layout = db.execute(
+                'SELECT id FROM topology_layouts WHERE network_id=? AND is_default=1',
+                (network_id,),
+            ).fetchone()
+        else:
+            layout = db.execute(
+                'SELECT id FROM topology_layouts WHERE id=? AND network_id=?',
+                (layout_id, network_id),
+            ).fetchone()
+            if layout is None:
+                raise HTTPException(404, 'Layout gehört nicht zum gewählten Netzwerk')
+        links = [] if layout is None else [
+            _topology_link_payload(row) for row in db.execute(
+                'SELECT * FROM topology_layout_links WHERE layout_id=? ORDER BY id',
+                (layout['id'],),
+            )
+        ]
+    return {'links':links, 'layout_id':layout['id'] if layout else None}
+
+
+@router.post('/links', status_code=201)
+def create_layout_link(
+    payload: TopologyLinkCreate,
+    network_id: int = Query(..., ge=1),
+):
+    """Create a user-drawn link; scanner evidence is never assigned here."""
+    with get_write_connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        require_network(db, network_id)
+        layout = db.execute(
+            'SELECT * FROM topology_layouts WHERE id=? AND network_id=?',
+            (payload.layout_id, network_id),
+        ).fetchone()
+        if layout is None:
+            raise HTTPException(404, 'Layout gehört nicht zum gewählten Netzwerk')
+        _validate_link_endpoint(db, network_id, layout['id'], payload.source)
+        _validate_link_endpoint(db, network_id, layout['id'], payload.target)
+        _validate_topology_link(db, layout['id'], payload.source, payload.target)
+        columns = {
+            **_link_endpoint_columns(payload.source, 'source'),
+            **_link_endpoint_columns(payload.target, 'target'),
+        }
+        cursor = db.execute(
+            """INSERT INTO topology_layout_links(
+                   layout_id,source_device_id,source_manual_node_id,source_room_id,
+                   target_device_id,target_manual_node_id,target_room_id,
+                   source_anchor,target_anchor,link_type,label,description,
+                   evidence_status,relation,waypoints_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'manual','[]')""",
+            (layout['id'],columns['source_device_id'],columns['source_manual_node_id'],
+             columns['source_room_id'],columns['target_device_id'],
+             columns['target_manual_node_id'],columns['target_room_id'],
+             payload.source.anchor,payload.target.anchor,payload.link_type,payload.label,
+             payload.description,'manual_documented'),
+        )
+        db.execute(
+            'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (layout['id'],),
+        )
+        link = db.execute(
+            'SELECT * FROM topology_layout_links WHERE id=?', (cursor.lastrowid,),
+        ).fetchone()
+    return {'link':_topology_link_payload(link)}
+
+
+@router.put('/links/{link_id}')
+def update_layout_link(
+    link_id: int,
+    payload: TopologyLinkUpdate,
+    network_id: int = Query(..., ge=1),
+):
+    """Edit documentation fields without changing link evidence provenance."""
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, 'Keine Verbindungsänderung angegeben')
+    if any(value is None for value in changes.values()):
+        raise HTTPException(422, 'Verbindungsfelder dürfen nicht null sein')
+    with get_write_connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        require_network(db, network_id)
+        link = db.execute(
+            """SELECT x.* FROM topology_layout_links x
+               JOIN topology_layouts l ON l.id=x.layout_id
+               WHERE x.id=? AND l.network_id=?""",
+            (link_id,network_id),
+        ).fetchone()
+        if link is None:
+            raise HTTPException(404, 'Verbindung gehört nicht zum gewählten Netzwerk')
+        fields = {
+            'link_type':'link_type', 'label':'label', 'description':'description',
+        }
+        assignments = ','.join(f'{column}=?' for column in (fields[key] for key in changes))
+        db.execute(
+            f'UPDATE topology_layout_links SET {assignments},updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (*changes.values(),link_id),
+        )
+        db.execute(
+            'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (link['layout_id'],),
+        )
+        result = db.execute(
+            'SELECT * FROM topology_layout_links WHERE id=?', (link_id,),
+        ).fetchone()
+    return {'link':_topology_link_payload(result)}
+
+
+@router.delete('/links/{link_id}')
+def delete_layout_link(
+    link_id: int,
+    network_id: int = Query(..., ge=1),
+):
+    with get_write_connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        require_network(db, network_id)
+        link = db.execute(
+            """SELECT x.id,x.layout_id FROM topology_layout_links x
+               JOIN topology_layouts l ON l.id=x.layout_id
+               WHERE x.id=? AND l.network_id=?""",
+            (link_id,network_id),
+        ).fetchone()
+        if link is None:
+            raise HTTPException(404, 'Verbindung gehört nicht zum gewählten Netzwerk')
+        db.execute('DELETE FROM topology_layout_links WHERE id=?', (link_id,))
+        db.execute(
+            'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',
+            (link['layout_id'],),
+        )
+    return {'deleted':True, 'id':link_id}
 
 
 @router.get('/snapshots')

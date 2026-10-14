@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -1127,6 +1127,135 @@ def migrate_room_minimum_height(connection):
                 "INSERT INTO sqlite_sequence(name,seq) VALUES('topology_rooms',?)",
                 (sequence['seq'] if hasattr(sequence, 'keys') else sequence[0],),
             )
+
+
+def migrate_topology_layout_links(connection):
+    """Add room endpoints and editable metadata to the reserved layout links table."""
+    connection.execute('DROP TRIGGER IF EXISTS topology_layout_links_address_delete')
+    connection.execute('DROP TABLE IF EXISTS topology_layout_links_v11')
+    execute_script(connection, """
+    CREATE TABLE topology_layout_links_v11 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        layout_id INTEGER NOT NULL,
+        source_device_id INTEGER,
+        source_manual_node_id INTEGER,
+        source_room_id INTEGER,
+        target_device_id INTEGER,
+        target_manual_node_id INTEGER,
+        target_room_id INTEGER,
+        source_anchor TEXT NOT NULL DEFAULT 'right'
+            CHECK(source_anchor IN ('top','right','bottom','left')),
+        target_anchor TEXT NOT NULL DEFAULT 'left'
+            CHECK(target_anchor IN ('top','right','bottom','left')),
+        link_type TEXT NOT NULL DEFAULT 'unknown'
+            CHECK(link_type IN ('ethernet','fiber','wifi','logical','unknown')),
+        label TEXT NOT NULL DEFAULT '' CHECK(length(label) <= 120),
+        description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),
+        evidence_status TEXT NOT NULL DEFAULT 'manual_documented'
+            CHECK(evidence_status IN ('manual_documented','scanner_derived','observed')),
+        waypoints_json TEXT NOT NULL DEFAULT '[]',
+        relation TEXT NOT NULL DEFAULT 'manual',
+        properties_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK((source_device_id IS NOT NULL) +
+              (source_manual_node_id IS NOT NULL) +
+              (source_room_id IS NOT NULL) = 1),
+        CHECK((target_device_id IS NOT NULL) +
+              (target_manual_node_id IS NOT NULL) +
+              (target_room_id IS NOT NULL) = 1),
+        CHECK(NOT (source_device_id IS NOT NULL AND target_device_id IS NOT NULL AND
+                   source_device_id=target_device_id)),
+        CHECK(NOT (source_manual_node_id IS NOT NULL AND target_manual_node_id IS NOT NULL AND
+                   source_manual_node_id=target_manual_node_id)),
+        CHECK(NOT (source_room_id IS NOT NULL AND target_room_id IS NOT NULL AND
+                   source_room_id=target_room_id)),
+        FOREIGN KEY(layout_id) REFERENCES topology_layouts(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_device_id) REFERENCES devices(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_manual_node_id) REFERENCES topology_manual_nodes(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_room_id) REFERENCES topology_rooms(id) ON DELETE CASCADE,
+        FOREIGN KEY(target_device_id) REFERENCES devices(id) ON DELETE CASCADE,
+        FOREIGN KEY(target_manual_node_id) REFERENCES topology_manual_nodes(id) ON DELETE CASCADE,
+        FOREIGN KEY(target_room_id) REFERENCES topology_rooms(id) ON DELETE CASCADE
+    );
+    """)
+    old_columns = get_table_columns(connection, 'topology_layout_links')
+    if old_columns:
+        connection.execute(
+            """INSERT INTO topology_layout_links_v11(
+                   id,layout_id,source_device_id,source_manual_node_id,
+                   target_device_id,target_manual_node_id,relation,properties_json,
+                   created_at,updated_at
+               ) SELECT id,layout_id,source_device_id,source_manual_node_id,
+                        target_device_id,target_manual_node_id,relation,properties_json,
+                        created_at,updated_at
+                 FROM topology_layout_links"""
+        )
+        connection.execute('DROP TABLE topology_layout_links')
+    connection.execute('ALTER TABLE topology_layout_links_v11 RENAME TO topology_layout_links')
+    execute_script(connection, """
+    CREATE INDEX IF NOT EXISTS idx_topology_layout_links_layout
+        ON topology_layout_links(layout_id,id);
+
+    CREATE TRIGGER IF NOT EXISTS topology_layout_links_address_delete
+    AFTER DELETE ON addresses
+    BEGIN
+        DELETE FROM topology_layout_links
+        WHERE layout_id IN (
+            SELECT id FROM topology_layouts WHERE network_id=OLD.network_id
+        ) AND (source_device_id=OLD.device_id OR target_device_id=OLD.device_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM addresses
+              WHERE network_id=OLD.network_id AND device_id=OLD.device_id
+          );
+    END;
+    """)
+
+
+def migrate_topology_auto_link_anchors(connection):
+    """Allow device links to store an automatic side selected by the router."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='topology_layout_links'"
+    ).fetchone()
+    if not row or not row[0]:
+        return
+    original_sql = row[0]
+    updated_sql = original_sql.replace('topology_layout_links', 'topology_layout_links_v12', 1)
+    updated_sql = updated_sql.replace(
+        "IN ('top','right','bottom','left')",
+        "IN ('top','right','bottom','left','auto')",
+    )
+    if updated_sql == original_sql:
+        raise RuntimeError('Could not update topology link anchor constraint')
+
+    dependent_sql = [item[0] for item in connection.execute(
+        "SELECT sql FROM sqlite_master WHERE "
+        "(tbl_name='topology_layout_links' OR name='topology_layout_links_address_delete') "
+        "AND type IN ('index','trigger') AND sql IS NOT NULL"
+    )]
+    connection.execute('DROP TRIGGER IF EXISTS topology_layout_links_address_delete')
+    connection.execute('DROP TABLE IF EXISTS topology_layout_links_v12')
+    connection.execute(updated_sql)
+    columns = [item[1] for item in connection.execute(
+        'PRAGMA table_info(topology_layout_links)'
+    )]
+    column_list = ','.join(columns)
+    connection.execute(
+        f'INSERT INTO topology_layout_links_v12({column_list}) '
+        f'SELECT {column_list} FROM topology_layout_links'
+    )
+    connection.execute('DROP TABLE topology_layout_links')
+    connection.execute('ALTER TABLE topology_layout_links_v12 RENAME TO topology_layout_links')
+    connection.execute(
+        """UPDATE topology_layout_links SET source_anchor='auto'
+           WHERE source_device_id IS NOT NULL OR source_manual_node_id IS NOT NULL"""
+    )
+    connection.execute(
+        """UPDATE topology_layout_links SET target_anchor='auto'
+           WHERE target_device_id IS NOT NULL OR target_manual_node_id IS NOT NULL"""
+    )
+    for statement in dependent_sql:
+        connection.execute(statement)
 
 
 def initialize_database(connection):
@@ -1449,6 +1578,10 @@ def initialize_database(connection):
             # the existing table constraint.
             if version < 10:
                 migrate_room_minimum_height(connection)
+            if version < 11:
+                migrate_topology_layout_links(connection)
+            if version < 12:
+                migrate_topology_auto_link_anchors(connection)
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

@@ -54,6 +54,8 @@ Node.js ist keine Laufzeitabhängigkeit. Die Oberfläche benötigt einen moderne
 Browser mit SVG, Pointer Events und DOMPoint.
 Bei vorhandenem Node.js prüft `node tests/frontend_harness.js` Auswahl,
 Filtererhalt und Detailaktualisierung gegen eine synthetische DOM-/API-Umgebung.
+`node tests/topology_routing_harness.js` prüft Orthogonalität, Hindernisvermeidung,
+Richtungswechsel und exakte Anschlüsse auch bei halben Rasterpositionen.
 
 ## Betriebsfreigabe und Migration
 
@@ -186,9 +188,33 @@ können wieder eingeblendet werden.
 
 Netzwerkbezeichnungen werden als CIDR kanonisiert und mit einem passenden
 Netzwerkdatensatz im selben Bereich verknüpft. Eine mehrdeutige Zuordnung wird
-mit HTTP 409 abgewiesen. `topology_layout_links` enthält fremdschlüsselgesicherte
-Endpunkte für spätere Verbindungen zwischen erkannten und manuellen Nodes; dieser
-Arbeitsblock fügt noch keine Verbindungsbearbeitung hinzu.
+mit HTTP 409 abgewiesen. Ab Schema v12 speichert `topology_layout_links`
+grafisch angelegte Verbindungen zwischen platzierten Geräten, manuellen Nodes
+und Räumen. Die API unter `/api/topology/links` erstellt, lädt, bearbeitet und
+löscht Verbindungen. Sie prüft Layout- und Netzwerkzugehörigkeit, Platzierung,
+Anschlussseiten und doppelte Endpunktpaare. Bei manuell angelegten Verbindungen
+setzt der Server den Evidenzstatus auf `manual_documented`; die Oberfläche kann
+keine Scanner-Evidenz behaupten. Beim Löschen von Endpunkten werden abhängige
+Verbindungen entfernt.
+
+Verbindungstypen sind Ethernet, Glasfaser, WLAN, logische Verbindung und
+unbekannt. Die Typangabe ist unabhängig vom Evidenzstatus. „Verbindung ziehen“
+im Objektmenü startet den Ziehvorgang. Bei Geräten und manuellen Nodes beginnt
+die Vorschau in der Iconmitte; Räume verwenden ihre vorhandenen Größen-Griffe.
+Das Loslassen über einem Node oder Raumgriff schließt die Verbindung ab. Die
+Routerseite von Geräteverbindungen wird bei jeder Neuberechnung automatisch
+gewählt; bestehende Geräte- und Node-Verbindungen werden bei der Migration
+ebenfalls auf diese Auswahl umgestellt. Linien werden aus den aktuellen
+Objektpositionen berechnet und bei Bewegung oder Raumgrößenänderung neu
+geroutet; Positionen der Verbindungen müssen dafür nicht in der Datenbank
+aktualisiert werden. Der Router verbindet die tatsächlichen Anschlusspunkte
+ohne Rasterumrechnung: Zuerst werden Wege mit null, einem oder zwei Knicken
+geprüft; bei Hindernissen sucht eine orthogonale Pixelsuche nach dem Weg mit
+den wenigsten Knicken und danach der kürzesten Länge. Fremde Räume werden
+umgangen. Parallel zu Raumrahmen hält die Route einen halben Rasterabstand;
+Start- und Zielräume bleiben erreichbar. Das Datenmodell reserviert
+`waypoints_json` für eine spätere Zwischenpunktbearbeitung; manuelle Zwischen-
+punkte sind noch nicht Teil der Oberfläche.
 
 Die lokale Routentabelle und der vorhandene Neighbor-Cache werden ohne neue
 Netzwerkabfragen gelesen. RouterOS liest ausschließlich freigegebene Datensätze.

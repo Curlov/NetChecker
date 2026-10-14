@@ -171,6 +171,184 @@ class WebTest(unittest.TestCase):
             self.ids[0]:(6,-2), self.ids[1]:(5,-2)
         }, {row['device_id']:(row['grid_x'],row['grid_y']) for row in after_swap['positions']})
 
+    def test_manual_topology_links_round_trip_edit_and_delete(self):
+        layout_url=f'/api/topology/layout?network_id={self.network}'
+        status,saved=self.put(layout_url,{'layout_id':None,'positions':[
+            {'device_id':self.ids[0],'grid_x':0,'grid_y':0},
+            {'device_id':self.ids[1],'grid_x':5,'grid_y':0},
+        ]})
+        self.assertEqual(200,status)
+        layout_id=saved['layout']['id']
+        self.assertEqual([],saved['links'])  # Placement never creates links.
+
+        manual_ids=[]
+        for kind,label,x in [('switch','Switch',2),('router','Router',8),('firewall','Firewall',11)]:
+            status,result=self.post(f'/api/topology/manual-nodes?network_id={self.network}',{
+                'layout_id':layout_id,'node_type':kind,'label':label,'grid_x':x,'grid_y':3,
+            })
+            self.assertEqual(200,status)
+            manual_ids.append(result['node']['id'])
+        room_url=f'/api/topology/rooms?network_id={self.network}'
+        status,parent=self.post(room_url,{
+            'layout_id':layout_id,'name':'Gebäude','grid_x':-10,'grid_y':-10,
+            'grid_width':30,'grid_height':20,'grid_cell_width':500,'grid_cell_height':400,
+        })
+        self.assertEqual(200,status)
+        status,child=self.post(room_url,{
+            'layout_id':layout_id,'parent_room_id':parent['room']['id'],'name':'Serverraum',
+            'grid_x':-5,'grid_y':-5,'grid_width':8,'grid_height':6,
+            'grid_cell_width':500,'grid_cell_height':400,
+        })
+        self.assertEqual(200,status)
+        status,grandchild=self.post(room_url,{
+            'layout_id':layout_id,'parent_room_id':child['room']['id'],'name':'Rack 01',
+            'grid_x':-4,'grid_y':-4,'grid_width':3,'grid_height':2,
+            'grid_cell_width':500,'grid_cell_height':400,
+        })
+        self.assertEqual(200,status)
+
+        def create(source,target,link_type='unknown',label='',description=''):
+            return self.post(f'/api/topology/links?network_id={self.network}',{
+                'layout_id':layout_id,'source':source,'target':target,'link_type':link_type,
+                'label':label,'description':description,
+            })
+
+        device_link={'device_id':self.ids[0],'anchor':'auto'}
+        second_device={'device_id':self.ids[1],'anchor':'auto'}
+        status,first=create(device_link,second_device,'ethernet','Uplink','Verbindung zum Verteiler')
+        self.assertEqual(201,status)
+        self.assertEqual('manual_documented',first['link']['evidence_status'])
+        self.assertEqual([],first['link']['waypoints'])
+        status,switch_link=create(
+            {'device_id':self.ids[0],'anchor':'bottom'},
+            {'manual_node_id':manual_ids[0],'anchor':'left'},'fiber')
+        self.assertEqual(201,status)
+        status,router_link=create(
+            {'manual_node_id':manual_ids[0],'anchor':'right'},
+            {'manual_node_id':manual_ids[1],'anchor':'left'},'logical')
+        self.assertEqual(201,status)
+        status,firewall_link=create(
+            {'manual_node_id':manual_ids[1],'anchor':'right'},
+            {'manual_node_id':manual_ids[2],'anchor':'left'},'wifi')
+        self.assertEqual(201,status)
+        status,room_link=create(
+            {'room_id':parent['room']['id'],'anchor':'right'},
+            {'room_id':grandchild['room']['id'],'anchor':'left'},'unknown')
+        self.assertEqual(201,status)
+        self.assertEqual(422,create(
+            {'room_id':parent['room']['id'],'anchor':'auto'},
+            {'device_id':self.ids[1],'anchor':'auto'})[0])
+
+        # Reversing the endpoint order is still a duplicate.
+        self.assertEqual(409,create(second_device,device_link)[0])
+        status,reloaded=self.request(layout_url)
+        self.assertEqual(200,status)
+        self.assertEqual(5,len(reloaded['links']))
+        status,links=self.request(f'/api/topology/links?network_id={self.network}&layout_id={layout_id}')
+        self.assertEqual(200,status)
+        self.assertEqual(5,len(links['links']))
+        stored=next(link for link in links['links'] if link['id']==first['link']['id'])
+        self.assertEqual({'device_id':self.ids[0],'anchor':'auto'},stored['source'])
+        self.assertEqual({'device_id':self.ids[1],'anchor':'auto'},stored['target'])
+
+        for kind in ('ethernet','fiber','wifi','logical','unknown'):
+            status,edited=self.put(
+                f'/api/topology/links/{first["link"]["id"]}?network_id={self.network}',
+                {'link_type':kind,'label':'Kernnetz','description':'Dokumentiert im Rackplan'},
+            )
+            self.assertEqual(200,status)
+            self.assertEqual(kind,edited['link']['link_type'])
+            self.assertEqual('Dokumentiert im Rackplan',edited['link']['description'])
+            self.assertEqual('manual_documented',edited['link']['evidence_status'])
+        self.assertEqual(422,self.put(
+            f'/api/topology/links/{first["link"]["id"]}?network_id={self.network}',
+            {'evidence_status':'observed'},
+        )[0])
+
+        connection=sqlite3.connect(self.path)
+        counts_before=tuple(connection.execute(
+            'SELECT (SELECT COUNT(*) FROM observations),(SELECT COUNT(*) FROM topology_links)'
+        ).fetchone())
+        connection.close()
+        self.assertEqual(200,self.delete(
+            f'/api/topology/links/{router_link["link"]["id"]}?network_id={self.network}'
+        )[0])
+        # Deleting endpoint objects removes all of their manually documented links.
+        self.assertEqual(200,self.delete(
+            f'/api/topology/manual-nodes/{manual_ids[2]}?network_id={self.network}'
+        )[0])
+        remaining=self.request(layout_url)[1]['links']
+        self.assertNotIn(firewall_link['link']['id'],{link['id'] for link in remaining})
+        self.assertEqual(200,self.delete(
+            f'/api/topology/rooms/{grandchild["room"]["id"]}?network_id={self.network}'
+        )[0])
+        self.assertNotIn(room_link['link']['id'],
+            {link['id'] for link in self.request(layout_url)[1]['links']})
+        connection=sqlite3.connect(self.path)
+        counts_after=tuple(connection.execute(
+            'SELECT (SELECT COUNT(*) FROM observations),(SELECT COUNT(*) FROM topology_links)'
+        ).fetchone())
+        connection.close()
+        self.assertEqual(counts_before,counts_after)
+
+        # A second address keeps the device in this network; links are removed
+        # only when the final network membership row disappears.
+        connection=sqlite3.connect(self.path)
+        original_addresses=[row[0] for row in connection.execute(
+            'SELECT ip FROM addresses WHERE network_id=? AND device_id=?',
+            (self.network,self.ids[0]),
+        )]
+        connection.execute(
+            'INSERT INTO addresses(device_id,network_id,ip) VALUES(?,?,?)',
+            (self.ids[0],self.network,'198.51.100.254'),
+        )
+        connection.executemany(
+            'DELETE FROM addresses WHERE network_id=? AND device_id=? AND ip=?',
+            [(self.network,self.ids[0],ip) for ip in original_addresses],
+        )
+        self.assertIsNotNone(connection.execute(
+            'SELECT 1 FROM topology_layout_links WHERE id=?',(first['link']['id'],),
+        ).fetchone())
+        connection.execute(
+            'DELETE FROM addresses WHERE network_id=? AND device_id=? AND ip=?',
+            (self.network,self.ids[0],'198.51.100.254'),
+        )
+        self.assertIsNone(connection.execute(
+            'SELECT 1 FROM topology_layout_links WHERE id=?',(first['link']['id'],),
+        ).fetchone())
+        connection.close()
+
+    def test_manual_topology_links_reject_invalid_unplaced_and_cross_layout_endpoints(self):
+        layout_url=f'/api/topology/layout?network_id={self.network}'
+        status,saved=self.put(layout_url,{'layout_id':None,'positions':[
+            {'device_id':self.ids[0],'grid_x':0,'grid_y':0},
+        ]})
+        self.assertEqual(200,status)
+        layout_id=saved['layout']['id']
+        url=f'/api/topology/links?network_id={self.network}'
+        base={'layout_id':layout_id,'source':{'device_id':self.ids[0],'anchor':'right'},
+              'target':{'device_id':self.ids[1],'anchor':'left'}}
+        self.assertEqual(409,self.post(url,base)[0])  # Existing but unplaced.
+        self.assertEqual(422,self.post(url,{**base,'source':{
+            'device_id':self.ids[0],'manual_node_id':7,'anchor':'right'}})[0])
+        self.assertEqual(422,self.post(url,{**base,'source':{
+            'device_id':self.ids[0],'anchor':'north'}})[0])
+        self.assertEqual(404,self.post(url,{**base,'target':{
+            'device_id':self.ids[2],'anchor':'left'}})[0])
+        self.assertEqual(404,self.post(url,{**base,'target':{
+            'device_id':999999,'anchor':'left'}})[0])
+        self.assertEqual(422,self.post(url,{**base,'evidence_status':'observed'})[0])
+        self.assertEqual(422,self.post(url,{**base,'target':{
+            'device_id':self.ids[0],'anchor':'left'}})[0])  # Self-link.
+
+        other_url=f'/api/topology/layout?network_id={self.other_network}'
+        other_saved=self.put(other_url,{'layout_id':None,'positions':[
+            {'device_id':self.ids[2],'grid_x':0,'grid_y':0},
+        ]})[1]
+        other_layout=other_saved['layout']['id']
+        self.assertEqual(404,self.post(url,{**base,'layout_id':other_layout,
+            'target':{'manual_node_id':999999,'anchor':'left'}})[0])
+
     def test_unplacing_device_removes_only_its_layout_and_room_membership(self):
         layout_url=f'/api/topology/layout?network_id={self.network}'
         status,saved=self.put(layout_url,{'layout_id':None,'positions':[
@@ -193,12 +371,19 @@ class WebTest(unittest.TestCase):
             'room_assignments':[{'device_id':self.ids[0],'room_id':room_id}]})
         self.assertEqual(200,status)
         self.assertEqual([self.ids[0]],assigned['rooms'][0]['device_ids'])
+        status,link=self.post(f'/api/topology/links?network_id={self.network}',{
+            'layout_id':layout_id,
+            'source':{'device_id':self.ids[0],'anchor':'right'},
+            'target':{'device_id':self.ids[1],'anchor':'left'},
+        })
+        self.assertEqual(201,status)
 
         status,removed=self.delete(
             f'/api/topology/layout/positions/{self.ids[0]}?network_id={self.network}&layout_id={layout_id}'
         )
         self.assertEqual(200,status)
         self.assertTrue(removed['deleted'])
+        self.assertNotIn(link['link']['id'],{item['id'] for item in removed['links']})
         self.assertEqual({self.ids[1]},
             {row['device_id'] for row in removed['positions']})
         room=next(room for room in removed['rooms'] if room['id']==room_id)
@@ -934,6 +1119,71 @@ class WebTest(unittest.TestCase):
         self.assertEqual([],connection.execute('PRAGMA foreign_key_check').fetchall())
         connection.close()
 
+    def test_schema_v11_to_v12_adds_auto_anchors_without_losing_links(self):
+        connection=sqlite3.connect(self.path)
+        connection.row_factory=sqlite3.Row
+        connection.execute(
+            "INSERT INTO topology_layouts(network_id,name,is_default) VALUES(?,'Auto anchor migration',0)",
+            (self.network,),
+        )
+        layout_id=connection.execute(
+            "SELECT id FROM topology_layouts WHERE name='Auto anchor migration'"
+        ).fetchone()['id']
+        connection.execute(
+            """INSERT INTO topology_layout_links(
+                   layout_id,source_device_id,target_device_id,source_anchor,target_anchor,
+                   link_type,label,description,evidence_status,waypoints_json
+               ) VALUES(?,?,?,'right','left','fiber','Backbone','Dokumentiert',
+                        'manual_documented','[]')""",
+            (layout_id,self.ids[0],self.ids[1]),
+        )
+        saved=tuple(connection.execute(
+            'SELECT id,source_anchor,target_anchor,link_type,label,description,evidence_status '
+            'FROM topology_layout_links WHERE layout_id=?',(layout_id,),
+        ).fetchone())
+        table_sql=connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='topology_layout_links'"
+        ).fetchone()[0]
+        dependent_sql=[row[0] for row in connection.execute(
+            "SELECT sql FROM sqlite_master WHERE "
+            "(tbl_name='topology_layout_links' OR name='topology_layout_links_address_delete') "
+            "AND type IN ('index','trigger') AND sql IS NOT NULL"
+        )]
+        legacy_sql=table_sql.replace('topology_layout_links','topology_layout_links_v11_test',1)
+        legacy_sql=legacy_sql.replace(
+            "IN ('top','right','bottom','left','auto')",
+            "IN ('top','right','bottom','left')",
+        )
+        connection.execute(legacy_sql)
+        columns=[row[1] for row in connection.execute('PRAGMA table_info(topology_layout_links)')]
+        column_list=','.join(columns)
+        connection.execute(
+            f'INSERT INTO topology_layout_links_v11_test({column_list}) '
+            f'SELECT {column_list} FROM topology_layout_links'
+        )
+        connection.execute('DROP TRIGGER IF EXISTS topology_layout_links_address_delete')
+        connection.execute('DROP TABLE topology_layout_links')
+        connection.execute(
+            'ALTER TABLE topology_layout_links_v11_test RENAME TO topology_layout_links'
+        )
+        for statement in dependent_sql:
+            connection.execute(statement)
+        connection.execute('DELETE FROM schema_migrations WHERE version=12')
+        connection.execute('PRAGMA user_version=11')
+        connection.commit()
+
+        schema.initialize_database(connection)
+        migrated=tuple(connection.execute(
+            'SELECT id,source_anchor,target_anchor,link_type,label,description,evidence_status '
+            'FROM topology_layout_links WHERE layout_id=?',(layout_id,),
+        ).fetchone())
+        self.assertEqual((saved[0],'auto','auto',*saved[3:]),migrated)
+        self.assertEqual('auto',connection.execute(
+            'SELECT source_anchor FROM topology_layout_links WHERE id=?',(saved[0],),
+        ).fetchone()[0])
+        self.assertEqual([],connection.execute('PRAGMA foreign_key_check').fetchall())
+        connection.close()
+
     def test_api_startup_migrates_old_schema_and_keeps_a_verified_backup(self):
         connection = sqlite3.connect(self.path)
         connection.execute('DROP TABLE topology_layout_links')
@@ -1092,7 +1342,8 @@ class WebTest(unittest.TestCase):
         self.assertIn("element.textContent = `${characters.slice(0,low).join('')}…`;",script)
         self.assertIn('topologyNodeYOffset',script)
         self.assertIn('function topologyNodePixelBounds(node)',script)
-        self.assertIn('node.element.getBBox()',script)
+        self.assertIn('const measured=child.getBBox();',script)
+        self.assertNotIn("topology-connection-grip",script)
         self.assertIn('row:nodeBounds.height+TOPOLOGY_VERTICAL_GAP,',script)
         self.assertIn('const box = bounds;',script)
         self.assertIn('...rooms.map(room => {',script)
@@ -1136,12 +1387,13 @@ class WebTest(unittest.TestCase):
         self.assertIn('function syncTopologyRooms(updatedRooms)',script)
         self.assertIn('return current ? Object.assign(current,updated) : updated;',script)
         self.assertIn('const currentRoom=topologyRooms.find(item => Number(item.id) === Number(room.id)) || room;',script)
-        self.assertIn('moveState={pointerId:event.pointerId,startPoint:point,nodes,room:currentRoom,',script)
+        self.assertIn('moveState={pointerId:event.pointerId,startPoint:point,nodes,',script)
+        self.assertIn('room:currentRoom,',script)
         self.assertIn('descendantRooms:descendants,subtreeIds',script)
         self.assertIn('setRoomShape(group,movedRoom,rect,label);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
-        self.assertIn('/static/topology.js?v=canvas-device-tray-1',template)
-        self.assertIn('/static/style.css?v=topology-device-tray-1',template)
+        self.assertIn('/static/topology.js?v=interactive-links-20',template)
+        self.assertIn('/static/style.css?v=topology-links-7',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
         self.assertNotIn('.topology-help',style)
@@ -1162,6 +1414,132 @@ class WebTest(unittest.TestCase):
         self.assertIn('aria-label="Interaktive Netzwerktopologie"',topology_html)
         self.assertIn('connection_points',(Path(__file__).parents[1]/'web/routers/topology.py').read_text())
         self.assertNotIn("#topology-manual-editor",script)
+
+    def test_topology_connections_start_from_objects_and_route_exact_anchors(self):
+        root=Path(__file__).parents[1]
+        script=(root/'web/static/topology.js').read_text()
+        router=(root/'web/static/topology-routing.js').read_text()
+        style=(root/'web/static/style.css').read_text()
+        template=(root/'web/templates/index.html').read_text()
+        for feature in (
+            'function topologyStartConnection(', 'function topologyFinishConnection(',
+            'function topologyUpdateConnectionDrag(', "type:'link-create'",
+            'topologyFinishConnection({pointerId:gesture.pointerId,type:\'pointercancel\'},true)',
+            'topology-connection-preview', 'topologyArmConnection({kind:\'node\',node})',
+            "topologyArmConnection({kind:'room',room})", 'function topologyBeginArmedConnection(event)',
+            'function topologyRoomHandleNearPoint(clientX,clientY,roomId=null)',
+            'function topologyRenderWithAddedLink(link)',
+            "topologyNodeEndpoint(node,'auto')", 'function topologyConnectionTargetAt(',
+            "return {n:'top',e:'right',s:'bottom',w:'left'}[grip] || null;",
+            'document.elementFromPoint(clientX,clientY)',
+            'topologyManualLinks = data.layout?.links || []',
+            'window.TopologyRouting.routeOrthogonalPixels(source,target,{',
+            '/api/topology/links?network_id=',
+            "'PUT',{link_type:type.value,label:label.value,description:description.value}",
+            "'DELETE'", 'openTopologyLinkContextMenu(event.clientX,event.clientY,edge.link,edge.a,edge.b)',
+            'Evidenzstatus:', "TOPOLOGY_EVIDENCE_LABELS[link.evidence_status]",
+            "const TOPOLOGY_CONNECTION_SIDES = ['top','right','bottom','left']",
+        ):
+            self.assertIn(feature,script)
+        self.assertIn('function routeOrthogonalPixels(source,target,',router)
+        self.assertIn('function chooseOrthogonalRoute(candidates)',router)
+        self.assertIn('const compareCost=(a,b)=>a.turns-b.turns || a.length-b.length;',router)
+        self.assertIn('const phase=advanceAnchorSegment(from,to,nodeRects,roomRects,',router)
+        self.assertNotIn('routeOrthogonalGrid(',script)
+        self.assertNotIn('orthogonalAnchorLead(',script)
+        self.assertNotIn('joinOrthogonalRoute(',script)
+        self.assertNotIn('pixelToHalfGrid',script)
+        self.assertNotIn('roomRoutingGeometry',script)
+        preview=script.split('function topologyDrawConnectionPreview(drag)',1)[1].split(
+            'function topologyConnectionTargetAt',1)[0]
+        self.assertNotIn('topologyGridSpacing',preview)
+        self.assertIn('const elbow=Math.abs(dx)>=Math.abs(dy)',preview)
+        self.assertIn("edge.pathElement.setAttribute('points','');",script)
+        self.assertIn("const preferredAxis=Math.abs(target.x-source.x)>=Math.abs(target.y-source.y) ? 'x' : 'y';",script)
+        self.assertIn('const anchorRouteForEdge=(edge,sourceSides,targetSides,geometry,maxTurns,preview,roomClearance)=>{',script)
+        self.assertIn('window.TopologyRouting.anchorRouteCandidates(',script)
+        self.assertIn('window.TopologyRouting.validAnchorRoute(',script)
+        self.assertIn('function validAnchorRoute(points,nodeRects=[],roomRects=[]',router)
+        self.assertIn('routeFollowsRoomBoundary(from,to,rect,roomClearance)',router)
+        self.assertIn('const roomClearance={x:topologyGridSpacing.column/2,y:topologyGridSpacing.row/2};',script)
+        self.assertIn('let best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
+        self.assertIn('if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,2,liveMove,roomClearance);',script)
+        self.assertIn('function anchorRouteCandidates(source,target,',router)
+        self.assertIn('const before=orthogonalPathMetrics(raw);',router)
+        self.assertIn('after.turns<=before.turns',router)
+        self.assertIn('for (const node of entries)',script)
+        self.assertIn('dragStartPoint = point;',script)
+        self.assertIn('node.x=dragOrigin.x+dx; node.y=dragOrigin.y+dy; redrawNode(node);',script)
+        self.assertIn('if (cellKey!==dragPreviewCell)',script)
+        self.assertIn('roomIdsForEndpoint=object=>',script)
+        self.assertIn('const startIds=liveMove ? new Set() : new Set(roomIdsForEndpoint(edge.a));',script)
+        room_anchor_refresh=script.split('for (const [roomId,visual] of roomVisuals)',1)[1].split('if (!manualEdges.length',1)[0]
+        self.assertIn('port.anchorPoint={x:point.x,y:point.y};',room_anchor_refresh)
+        self.assertNotIn('port.handle.setAttribute(',room_anchor_refresh)
+        self.assertIn('function createRoomContext(rooms,startRoomIds,endRoomIds)',router)
+        self.assertIn('function advanceRoomPhase(context,phase,key)',router)
+        self.assertIn('roomCells=[]',router)
+        self.assertIn('blockedCells',router)
+        self.assertNotIn('usedCells',router)
+        self.assertNotIn('usedCells',script)
+        self.assertIn('.topology-manual-link-selected .topology-manual-link-path',style)
+        self.assertIn("document.querySelectorAll('.topology-manual-link').forEach(group =>\n        group.classList.toggle('topology-manual-link-selected'",script)
+        self.assertIn('.topology-manual-link { pointer-events:none; outline:none; }',style)
+        self.assertIn('.topology-manual-link:focus-visible .topology-manual-link-path',style)
+        self.assertIn('.topology-manual-link-hit { fill:none; stroke:transparent; stroke-width:14;',style)
+        self.assertIn("edge.hitPathElement.setAttribute('points',path);",script)
+        self.assertIn("group.addEventListener('click',event=>{event.stopPropagation();selectTopologyLink(edge.link);});",script)
+        self.assertIn("group.addEventListener('pointerdown',event=>{",script)
+        self.assertIn('event.preventDefault(); event.stopPropagation();\n            selectTopologyLink(edge.link);',script)
+        self.assertIn("group.addEventListener('contextmenu',event=>{",script)
+        self.assertIn("/api/topology/links/${encodeURIComponent(link.id)}?network_id=",script)
+        self.assertIn('.topology-connection-target-valid',style)
+        self.assertIn('#topology-graph.topology-connection-active .topology-room-handle',style)
+        self.assertIn('#topology-graph.topology-connection-armed .topology-room-grip-nw',style)
+        self.assertNotIn('.topology-connection-grip',style)
+        self.assertIn('port.localAnchorPoint={x,y};',script)
+        self.assertIn('const portAnchor=visual.ports.get(side)?.localAnchorPoint;',script)
+        self.assertIn('topologyGraph.setPointerCapture(event.pointerId);',script)
+        self.assertIn('const sourceSides=edge.a.kind===\'node\' && edge.link.source.anchor===\'auto\'',script)
+        self.assertIn('best=window.TopologyRouting.chooseOrthogonalRoute(candidates);',script)
+        self.assertIn('let best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
+        self.assertIn('const scheduleManualLinkRedraw=(change={all:true})=>{',script)
+        self.assertIn('const dirtyEdges=manualEdges.filter(isDirty);',script)
+        self.assertIn('redraw([node],{nodes:[node]',script)
+        drop_preview=script.split('function setTopologyRoomDropPreview(roomId)',1)[1].split(
+            'function clearTopologyRoomDropPreview',1)[0]
+        self.assertIn('if (normalizedId === topologyDropPreviewRoomId) return;',drop_preview)
+        self.assertNotIn('querySelectorAll',drop_preview)
+        self.assertIn('topologyLinkRedrawTimer=setTimeout(',script)
+        self.assertIn('maxTurns=Infinity',router)
+        self.assertIn('if (hit===topologyGraph || hit?.closest?.(\'.topology-room\')) {',script)
+        node_bounds=script.split('function topologyNodePixelBounds(node)',1)[1].split('function topologyRoomResizeLimits',1)[0]
+        self.assertNotIn('connection-grip',node_bounds)
+        self.assertIn('const measured=child.getBBox();',node_bounds)
+        self.assertIn('topology-routing.js?v=geometry-a-star-12',template)
+        self.assertIn('/static/topology.js?v=interactive-links-20',template)
+        self.assertIn("console.error(`Topologiefehler während „${loadPhase}“`,error)",script)
+        self.assertIn("const apiFailure = loadPhase !== 'Topologie darstellen'",script)
+        self.assertIn('const connectionPoints={top:points.n,right:points.e,bottom:points.s,left:points.w};',script)
+        self.assertNotIn("evidence_status:'observed'",script)
+        harness=(root/'tests/topology_routing_harness.js').read_text()
+        self.assertIn("require('../web/static/topology-routing.js')",harness)
+        self.assertIn("'A clear connection takes the shortest direct route'",harness)
+        self.assertIn("'A room-style anchor-to-grid adapter is orthogonal'",harness)
+        self.assertIn("'Diagonal pixel segments are rejected'",harness)
+        self.assertIn("'An impossible bounded route is omitted instead of crossing an obstacle'",harness)
+        self.assertIn("'A connection never cuts through a foreign room",harness)
+        self.assertIn("'After leaving the source room, the route does not re-enter it",harness)
+        self.assertIn("'Nested routing avoids sibling rooms",harness)
+        self.assertIn("'After entering the target room, the route stays there",harness)
+        self.assertIn("'A blocked midpoint moves to the nearest free grid axis'",harness)
+        self.assertIn('Fractional room anchors use one full-size bend instead of raster adapter hooks',harness)
+        self.assertIn('A boundary proximity penalty cannot add a needless bend',harness)
+        self.assertIn('The router chooses the shortest two-bend path before a supplied visual midpoint',harness)
+        self.assertIn('A one-grid-row room meets an offset device port with only two centered bends',harness)
+        self.assertIn('A parallel route two pixels from the room frame violates the half-cell clearance',harness)
+        self.assertIn('Exact fractional anchors are routed without grid conversion',harness)
+        self.assertIn('The pixel fallback keeps two bends around a device obstacle',harness)
 
     def test_timeline_midnight_missing_and_explicit_port_close(self):
         connection = sqlite3.connect(self.path)
