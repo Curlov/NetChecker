@@ -198,7 +198,7 @@ function updateTimelinePortRow(deviceId, deviceRow, port) {
 function updateTimelineDevice(device) {
     const key = String(device.id);
     const row = timelineDeviceRows.get(key) || createTimelineDeviceRow(device);
-    row.label.textContent = [device.hostname, device.ip].filter(Boolean).join(' · ') || `Gerät #${device.id}`;
+    row.label.textContent = [device.ip, device.display_name || device.hostname].filter(Boolean).join(' · ') || `Gerät #${device.id}`;
     updateTimelineTrack(row.track, device.intervals);
     for (const port of device.ports) updateTimelinePortRow(key, row, port);
     row.empty.hidden = row.portRows.size > 0;

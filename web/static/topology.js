@@ -2,8 +2,8 @@ const svgNamespace = 'http://www.w3.org/2000/svg';
 const TOPOLOGY_LABEL_REFERENCE = '333.333.333.333';
 const TOPOLOGY_HORIZONTAL_GAP = 5;
 const TOPOLOGY_VERTICAL_GAP = 17;
-const TOPOLOGY_TRAY_ITEM_WIDTH = 132;
-const TOPOLOGY_TRAY_ITEM_HEIGHT = 88;
+const TOPOLOGY_TRAY_ITEM_WIDTH = 110;
+const TOPOLOGY_TRAY_ITEM_HEIGHT = 72;
 const TOPOLOGY_GRID_ORIGIN = {x:90,y:60};
 const TOPOLOGY_ROOM_TITLE_GAP = 8;
 const TOPOLOGY_ROOM_TITLE_HEIGHT = 26;
@@ -15,6 +15,7 @@ let topologyMutationVersion = 0;
 let topologyManualNodes = [];
 let topologyManualLinks = [];
 let topologyCurrentRenderData = null;
+let topologyRenderFingerprint = null;
 let topologyLinkRedrawFrame = null;
 let topologyLinkRedrawTimer = null;
 let selectedManualNodeId = null;
@@ -421,7 +422,7 @@ function createTopologyNodeVisual(node) {
         {tone:'unknown',label:'Status unbekannt'};
     const origin = node.manual ? (node.device ? 'Manuell angelegt · mit erkanntem Gerät verknüpft' :
         'Manuell angelegt · nicht vom Scanner erkannt') : 'Vom Scanner erkannt';
-    const description = `${node.label} · ${design.label} · ${origin} · ${presence.label}`;
+    const description = `${node.label} · ${node.device?.display_name ? `${node.device.display_name} · ` : ''}${design.label} · ${origin} · ${presence.label}`;
     const selectedClass = node.key === selectedTopologyNodeKey ? ' topology-node-selected' : '';
     const group = svgElement('g',{class:`topology-node topology-status-${presence.tone}${node.manual ? ' topology-node-manual' : ''}${selectedClass}`,tabindex:0,
         'aria-label':description,
@@ -437,18 +438,20 @@ function createTopologyNodeVisual(node) {
     label.textContent = fullLabel;
     const title = svgElement('title',{}); title.textContent = description; group.appendChild(title);
     const statusLabel = svgElement('text',{x:0,y:47,'text-anchor':'middle',class:'topology-status-label'});
-    statusLabel.textContent = node.manual && !node.device ? 'Manuell' : presence.tone === 'present' ? 'Erreichbar' :
-        presence.tone === 'missing' ? 'Nicht erreichbar' : 'Status unbekannt';
+    statusLabel.textContent = node.manual && !node.device ? 'Manuell' :
+        (presence.tone === 'present' || presence.tone === 'missing') ?
+            String(node.device?.display_name || node.device?.hostname || '').trim() : 'Status unbekannt';
     group.appendChild(statusLabel);
     group.appendChild(label);
     const labelTitle = svgElement('title',{}); labelTitle.textContent = fullLabel; label.appendChild(labelTitle);
     group.topologyLabelElement=label;
+    group.topologyStatusElement=statusLabel;
     return group;
 }
 
 function topologyDeviceSearchText(device) {
     const design=deviceClassDesign(device.category);
-    return [device.ip,device.hostname,device.category,design.label].filter(Boolean).join(' ').toLocaleLowerCase('de');
+    return [device.ip,device.hostname,device.display_name,device.category,design.label].filter(Boolean).join(' ').toLocaleLowerCase('de');
 }
 
 function renderTopologyUnplacedDevices() {
@@ -492,6 +495,8 @@ function renderTopologyUnplacedDevices() {
         item.addEventListener('lostpointercapture',event => finishTopologyTrayDrag(event,true));
         list.appendChild(item);
         fitTopologyNodeLabel(visual.topologyLabelElement,String(node.label),TOPOLOGY_TRAY_ITEM_WIDTH-12);
+        fitTopologyNodeLabel(visual.topologyStatusElement,visual.topologyStatusElement.textContent,
+            Math.min(TOPOLOGY_TRAY_ITEM_WIDTH-12,topologyLabelMaxWidth));
     }
     empty.hidden=matching.length > 0;
     empty.textContent=topologyUnplacedDevices.length === 0
@@ -511,7 +516,10 @@ async function loadInventoryTopology({preserveGraphOnError=false} = {}) {
     const requestId = ++topologyRequestId;
     const status = document.querySelector('#topology-status');
     const graph = document.querySelector('#topology-graph');
-    document.querySelector('#topology-evidence').textContent = '';
+    // Evidence occupies space below the flex canvas. Clearing it on every
+    // refresh changed the canvas height even when nobody touched the page.
+    if (String(networkId) !== topologyGraphContext)
+        document.querySelector('#topology-evidence').textContent = '';
     if (!networkId) {
         if (!preserveGraphOnError) {
             if (topologyEditorGesture) cancelTopologyGesture();
@@ -522,6 +530,7 @@ async function loadInventoryTopology({preserveGraphOnError=false} = {}) {
         topologyManualNodes = [];
         topologyManualLinks = [];
         topologyRooms = [];
+        topologyRenderFingerprint = null;
         selectedManualNodeId = null;
         selectedRoomId = null;
         selectedTopologyNodeKey = null;
@@ -529,7 +538,10 @@ async function loadInventoryTopology({preserveGraphOnError=false} = {}) {
         setTopologySaveStatus('Kein Netzwerk ausgewählt');
         return;
     }
-    status.textContent = 'Lade Geräte …';
+    // Keep the heading height stable during periodic refreshes; a shorter
+    // loading label can otherwise resize the flex canvas on narrow screens.
+    if (!graph.childElementCount || topologyGraphContext !== String(networkId))
+        status.textContent = 'Lade Geräte …';
     try {
         await loadDevices();
         if (requestId !== topologyRequestId || networkId !== networkSelect.value ||
@@ -556,9 +568,30 @@ async function loadInventoryTopology({preserveGraphOnError=false} = {}) {
         if (topologyEditorGesture) cancelTopologyGesture();
         loadPhase = 'Topologie darstellen';
         setConnectionStatus('API verbunden', true);
+        // A new scanner snapshot can contain the same visible connections.
+        // Compare what the canvas actually draws, not the snapshot ID.
+        const scannerLinks=data.links || [];
+        const fingerprint=JSON.stringify([networkId,layout,
+            devices.map(device=>[device.id,device.ip,device.mac,device.hostname,
+                device.display_name,device.category,device.presence]),
+            scannerLinks.map(link=>[link.source_device_id,link.target_device_id,
+                link.source_ip,link.target_ip,link.relation,link.evidence_source,
+                link.confidence])]);
+        if (String(networkId)===topologyGraphContext && graph.childElementCount &&
+            topologyCurrentRenderData?.links?.length===scannerLinks.length &&
+            fingerprint===topologyRenderFingerprint) {
+            // Keep click-through scanner evidence current without replacing SVG nodes.
+            const currentLinks=topologyCurrentRenderData?.links || [];
+            for (let index=0;index<scannerLinks.length;index++)
+                Object.assign(currentLinks[index],scannerLinks[index]);
+            if (topologyCurrentRenderData) topologyCurrentRenderData.snapshot=data.snapshot;
+            status.textContent = `${devices.length} Geräte · aktueller Inventarstatus`;
+            return;
+        }
         topologyManualNodes = layout.manual_nodes || [];
         topologyRooms = layout.rooms || [];
         renderTopologyGraph({...data, networkId, layout});
+        topologyRenderFingerprint=fingerprint;
         setTopologySaveStatus(layout.layout ? 'Layout geladen' : 'Noch keine Positionen gespeichert',
             layout.layout ? 'saved' : '');
         status.textContent = `${devices.length} Geräte · aktueller Inventarstatus`;
@@ -1019,6 +1052,7 @@ function renderTopologyGraph(data) {
     const manualEdges=topologyManualLinks.map(link=>({
         link,a:resolveManualLinkEndpoint(link.source),b:resolveManualLinkEndpoint(link.target)
     })).filter(edge=>edge.a && edge.b).sort((a,b)=>Number(a.link.id)-Number(b.link.id));
+    let segmentDrag=null;
     // Connections wholly inside a moving room keep their route relative to that room.
     const internalRoomLinks=(nodes,subtreeIds,roomId)=>{
         const movedNodes=new Set(nodes);
@@ -1070,10 +1104,10 @@ function renderTopologyGraph(data) {
         }
     };
     for (const edge of manualEdges) {
-        const group=svgElement('g',{class:`topology-manual-link topology-link-evidence-${edge.link.evidence_status || 'manual_documented'}${
+        const group=svgElement('g',{class:`topology-manual-link topology-link-type-${edge.link.link_type || 'unknown'} topology-link-evidence-${edge.link.evidence_status || 'manual_documented'}${
             Number(edge.link.id)===selectedTopologyLinkId ? ' topology-manual-link-selected' : ''}`,
             'data-link-id':Number(edge.link.id),tabindex:0,
-            'aria-label':`${edge.link.label || 'Verbindung'} · ${TOPOLOGY_LINK_TYPES.find(item=>item[0]===edge.link.link_type)?.[1] || 'Unbekannt'}`});
+            'aria-label':`${edge.link.label || 'Verbindung'} · ${TOPOLOGY_LINK_TYPES.find(item=>item[0]===edge.link.link_type)?.[1] || 'Unbekannt'} · ${TOPOLOGY_EVIDENCE_LABELS[edge.link.evidence_status] || 'Manuell dokumentiert'}`});
         const hitPath=svgElement('polyline',{class:'topology-manual-link-hit',points:''});
         group.appendChild(hitPath);
         const line=svgElement('polyline',{class:'topology-manual-link-path',points:''});
@@ -1085,8 +1119,11 @@ function renderTopologyGraph(data) {
         group.addEventListener('pointerdown',event=>{
             if (event.button!==0) return;
             event.preventDefault(); event.stopPropagation();
+            const wasSelected=selectedTopologyLinkId===Number(edge.link.id);
             selectTopologyLink(edge.link);
             closeTopologyContextMenu();
+            if (wasSelected && !topologyEditorGesture && edge.routePoints?.length &&
+                window.TopologyRouting) beginTopologySegmentDrag(edge,group,event);
         });
         group.addEventListener('click',event=>{event.stopPropagation();selectTopologyLink(edge.link);});
         group.addEventListener('keydown',event=>{
@@ -1096,6 +1133,16 @@ function renderTopologyGraph(data) {
             event.preventDefault();event.stopPropagation();selectTopologyLink(edge.link);
             openTopologyLinkContextMenu(event.clientX,event.clientY,edge.link,edge.a,edge.b);
         });
+        group.addEventListener('pointermove',event=>{
+            if (segmentDrag?.edge===edge) moveTopologySegmentDrag(event);
+            else if (selectedTopologyLinkId===Number(edge.link.id) && edge.routePoints?.length) {
+                const point=topologySvgPoint(event.clientX,event.clientY);
+                const segment=point && nearestTopologyLinkSegment(edge.routePoints,point);
+                edge.hitPathElement.style.cursor=segment?.horizontal ? 'ns-resize' : 'ew-resize';
+            }
+        });
+        for (const name of ['pointerup','pointercancel','lostpointercapture'])
+            group.addEventListener(name,event=>finishTopologySegmentDrag(event));
         svg.appendChild(group); edge.element=group; edge.hitPathElement=hitPath;
         edge.pathElement=line; edge.labelElement=edge.link.label ? label : null;
     }
@@ -1165,6 +1212,123 @@ function renderTopologyGraph(data) {
             }
         }
         return [...ids];
+    };
+    const drawManualEdge=(edge,points,preview=false)=>{
+        edge.routePoints=points;
+        edge.element.classList.toggle('topology-manual-link-drag-preview',preview);
+        const path=points.map(point=>`${point.x},${point.y}`).join(' ');
+        edge.hitPathElement.setAttribute('points',path);
+        edge.pathElement.setAttribute('points',path);
+        if (!edge.labelElement) return;
+        let longest=null;
+        for (let index=1;index<points.length;index++) {
+            const from=points[index-1],to=points[index];
+            const length=Math.hypot(to.x-from.x,to.y-from.y);
+            if (!longest || length>longest.length) longest={from,to,length};
+        }
+        if (longest) {
+            edge.labelElement.removeAttribute('display');
+            edge.labelElement.setAttribute('x',(longest.from.x+longest.to.x)/2);
+            edge.labelElement.setAttribute('y',(longest.from.y+longest.to.y)/2-5);
+        }
+    };
+    const validEditedLinkRoute=(edge,points,state)=>{
+        if (!window.TopologyRouting.isOrthogonalPath(points) || points.length-2>128) return false;
+        const source=state.source, target=state.target;
+        // Manual routing is a drawing choice. Only exact icon/room anchors and
+        // orthogonality are mandatory; obstacles and rooms do not limit it.
+        return points[0].x===source.x && points[0].y===source.y &&
+            points.at(-1).x===target.x && points.at(-1).y===target.y;
+    };
+    const nearestTopologyLinkSegment=(points,point)=>{
+        let nearest=null;
+        for (let index=0;index<points.length-1;index++) {
+            const a=points[index],b=points[index+1];
+            const horizontal=a.y===b.y;
+            const distance=horizontal
+                ? Math.hypot(point.x-Math.max(Math.min(a.x,b.x),Math.min(point.x,Math.max(a.x,b.x))),point.y-a.y)
+                : Math.hypot(point.x-a.x,point.y-Math.max(Math.min(a.y,b.y),Math.min(point.y,Math.max(a.y,b.y))));
+            if (!nearest || distance<nearest.distance) nearest={index,horizontal,distance};
+        }
+        return nearest;
+    };
+    const beginTopologySegmentDrag=(edge,group,event)=>{
+        const start=topologySvgPoint(event.clientX,event.clientY);
+        const segment=start && nearestTopologyLinkSegment(edge.routePoints,start);
+        if (!segment) return;
+        const source=manualLinkAnchor(edge.a,edge.sourceSide,edge.b);
+        const target=manualLinkAnchor(edge.b,edge.targetSide,edge.a);
+        if (!source || !target) return;
+        segmentDrag={edge,group,pointerId:event.pointerId,index:segment.index,
+            horizontal:segment.horizontal,start,original:edge.routePoints.map(point=>({...point})),
+            current:edge.routePoints.map(point=>({...point})),source,target};
+        topologyEditorGesture={type:'link-segment',pointerId:event.pointerId,target:group};
+        group.setPointerCapture(event.pointerId);
+    };
+    const moveTopologySegmentDrag=event=>{
+        const state=segmentDrag;
+        if (!state || event.pointerId!==state.pointerId) return;
+        if ((event.buttons&1)===0) {finishTopologySegmentDrag({pointerId:event.pointerId,type:'pointercancel'});return;}
+        const point=topologySvgPoint(event.clientX,event.clientY);
+        if (!point) return;
+        const axis=state.horizontal ? 'y' : 'x';
+        const spacing=state.horizontal ? topologyGridSpacing.row : topologyGridSpacing.column;
+        // Use the segment's own grid phase: a device icon is vertically offset
+        // from the cell center, and room anchors may lie on a half-grid line.
+        const initial=state.original[state.index][axis];
+        const coordinate=window.TopologyRouting.snapSegmentCoordinate(initial,
+            point[axis]-state.start[axis],initial,spacing);
+        const shifted=window.TopologyRouting.shiftOrthogonalSegment(state.original,state.index,
+            coordinate,spacing/2,{allowSelfIntersections:true});
+        if (!shifted || !validEditedLinkRoute(state.edge,shifted,state)) {
+            state.edge.hitPathElement.style.cursor='not-allowed';
+            return;
+        }
+        state.edge.hitPathElement.style.cursor=state.horizontal ? 'ns-resize' : 'ew-resize';
+        state.current=shifted;
+        drawManualEdge(state.edge,shifted);
+        event.preventDefault();
+    };
+    const finishTopologySegmentDrag=event=>{
+        const state=segmentDrag;
+        if (!state || event.pointerId!==state.pointerId) return;
+        segmentDrag=null;
+        topologyEditorGesture=null;
+        state.edge.hitPathElement.style.cursor='';
+        if (state.group.hasPointerCapture(event.pointerId)) state.group.releasePointerCapture(event.pointerId);
+        if (event.type!=='pointerup' || state.current.every((point,index)=>
+            point.x===state.original[index]?.x && point.y===state.original[index]?.y) &&
+            state.current.length===state.original.length) {
+            drawManualEdge(state.edge,state.original);
+            if (event.type!=='pointerup') setTopologySaveStatus('Linienbearbeitung abgebrochen');
+            return;
+        }
+        // Persist offsets from the source anchor. A parent-room move translates
+        // both endpoints and the manually shaped route without rewriting links.
+        const origin=state.current[0];
+        const waypoints=state.current.slice(1,-1).map(point=>({
+            x:point.x-origin.x,y:point.y-origin.y
+        }));
+        const networkId=networkSelect.value;
+        void (async()=>{
+            let saved=false;
+            try {
+                setTopologySaveStatus('Speichere Linienführung …','saving');
+                const result=await topologyManualRequest(
+                    `/api/topology/links/${encodeURIComponent(state.edge.link.id)}?network_id=${encodeURIComponent(networkId)}`,
+                    'PUT',{waypoints});
+                state.edge.link.waypoints=result.link.waypoints;
+                topologyRenderFingerprint=null;
+                saved=true;
+                setTopologySaveStatus('Linienführung gespeichert','saved');
+                await loadInventoryTopology({preserveGraphOnError:true});
+            } catch (error) {
+                if (!saved) drawManualEdge(state.edge,state.original);
+                setTopologySaveStatus(saved
+                    ? `Linienführung gespeichert; Aktualisierung fehlgeschlagen: ${error.message}`
+                    : `Linienführung nicht gespeichert: ${error.message}`,'error');
+            }
+        })();
     };
     const routeIntersectsRect=(points,rect)=>{
         if (!points?.length || !rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y)) return false;
@@ -1248,14 +1412,34 @@ function renderTopologyGraph(data) {
                 ? TOPOLOGY_CONNECTION_SIDES : [edge.link.source.anchor];
             const targetSides=edge.b.kind==='node' && edge.link.target.anchor==='auto'
                 ? TOPOLOGY_CONNECTION_SIDES : [edge.link.target.anchor];
-            let best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);
+            const nodeRects=anchorGeometry.nodes.filter(({node})=>
+                (edge.a.kind!=='node' || edge.a.node!==node) &&
+                (edge.b.kind!=='node' || edge.b.node!==node));
+            const startIds=liveMove ? new Set() : new Set(roomIdsForEndpoint(edge.a));
+            const endIds=liveMove ? new Set() : new Set(roomIdsForEndpoint(edge.b));
+            let best=null;
+            if (Array.isArray(edge.link.waypoints) && edge.link.waypoints.length) {
+                const candidates=[];
+                const manualSourceSides=liveMove && edge.sourceSide ? [edge.sourceSide] : sourceSides;
+                const manualTargetSides=liveMove && edge.targetSide ? [edge.targetSide] : targetSides;
+                for (const sourceSide of manualSourceSides) for (const targetSide of manualTargetSides) {
+                    const source=manualLinkAnchor(edge.a,sourceSide,edge.b);
+                    const target=manualLinkAnchor(edge.b,targetSide,edge.a);
+                    if (!source || !target) continue;
+                    const absoluteWaypoints=edge.link.waypoints.map(point=>({
+                        x:source.x+point.x,y:source.y+point.y
+                    }));
+                    const points=window.TopologyRouting.routeThroughWaypoints(source,target,
+                        absoluteWaypoints,{unrestricted:true});
+                    if (points) candidates.push({sourceSide,targetSide,points,preview:liveMove});
+                }
+                best=window.TopologyRouting.chooseOrthogonalRoute(candidates);
+            }
+            edge.element.classList.toggle('topology-manual-link-fallback',
+                Boolean(edge.link.waypoints?.length) && !best);
+            if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);
             if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,2,liveMove,roomClearance);
             if (!best) {
-                const nodeRects=anchorGeometry.nodes.filter(({node})=>
-                    (edge.a.kind!=='node' || edge.a.node!==node) &&
-                    (edge.b.kind!=='node' || edge.b.node!==node));
-                const startIds=liveMove ? new Set() : new Set(roomIdsForEndpoint(edge.a));
-                const endIds=liveMove ? new Set() : new Set(roomIdsForEndpoint(edge.b));
                 const candidates=[];
                 for (const sourceSide of sourceSides) for (const targetSide of targetSides) {
                     const source=manualLinkAnchor(edge.a,sourceSide,edge.b);
@@ -1276,25 +1460,9 @@ function renderTopologyGraph(data) {
                 if (edge.labelElement) edge.labelElement.setAttribute('display','none');
                 continue;
             }
-            const points=best.points;
-            edge.routePoints=points;
-            edge.element.classList.toggle('topology-manual-link-drag-preview',best.preview);
-            const path=points.map(point=>`${point.x},${point.y}`).join(' ');
-            edge.hitPathElement.setAttribute('points',path);
-            edge.pathElement.setAttribute('points',path);
-            if (edge.labelElement) {
-                edge.labelElement.removeAttribute('display');
-                let longest=null;
-                for (let index=1;index<points.length;index++) {
-                    const from=points[index-1],to=points[index];
-                    const length=Math.hypot(to.x-from.x,to.y-from.y);
-                    if (!longest || length>longest.length) longest={from,to,length};
-                }
-                if (longest) {
-                    edge.labelElement.setAttribute('x',(longest.from.x+longest.to.x)/2);
-                    edge.labelElement.setAttribute('y',(longest.from.y+longest.to.y)/2-5);
-                }
-            }
+            edge.sourceSide=best.sourceSide;
+            edge.targetSide=best.targetSide;
+            drawManualEdge(edge,best.points,best.preview);
         }
     };
     const emptyLinkInvalidation=()=>({all:false,nodes:new Set(),rooms:new Set(),rects:[],
@@ -1325,7 +1493,7 @@ function renderTopologyGraph(data) {
         });
     };
     redrawConnections=scheduleManualLinkRedraw;
-    const redraw = (changedNodes=null,invalidation={all:true}) => {
+    const redraw = (changedNodes=null,invalidation={all:true},scheduleLinks=true) => {
         const changed=changedNodes ? new Set(changedNodes) : null;
         for (const edge of links) {
             if (changed && !changed.has(edge.a) && !changed.has(edge.b)) continue;
@@ -1340,7 +1508,7 @@ function renderTopologyGraph(data) {
                 gridColumn:node.gridColumn, gridRow:node.gridRow
             });
         }
-        redrawConnections(invalidation);
+        if (scheduleLinks) redrawConnections(invalidation);
     };
     const redrawNode = node => {
         redraw([node],{nodes:[node],rects:[nodeBoundsAt(node)]});
@@ -1402,6 +1570,8 @@ function renderTopologyGraph(data) {
         const group=createTopologyNodeVisual(node);
         svg.appendChild(group); node.element = group;
         fitTopologyNodeLabel(group.topologyLabelElement,String(node.label),topologyLabelMaxWidth);
+        fitTopologyNodeLabel(group.topologyStatusElement,group.topologyStatusElement.textContent,
+            topologyLabelMaxWidth);
         let dragOrigin = null;
         let dragStartPoint = null;
         let dragPreviewCell = null;
@@ -1465,9 +1635,12 @@ function renderTopologyGraph(data) {
             }
         });
     }
-    redraw();
+    // Complete the first frame before the browser paints. Deferred routing
+    // made links disappear briefly whenever a refresh rebuilt the SVG.
+    redraw(null,{all:true},false);
     topologyRenderedNodes = entries;
     refreshTopologyRoomShapes();
+    redrawManualLinks({all:true});
     if (selectedRoomId !== null) raiseTopologyRoomToFront(selectedRoomId);
 }
 
@@ -1485,6 +1658,7 @@ function topologyRenderWithAddedLink(link) {
     topologyManualNodes=manualNodes;
     topologyManualLinks=links;
     topologyCurrentRenderData={...current,layout};
+    topologyRenderFingerprint=null;
     renderTopologyGraph(topologyCurrentRenderData);
     return true;
 }
@@ -1544,6 +1718,8 @@ function selectTopologyRoom(room) {
 function selectTopologyLink(link) {
     selectedTopologyLinkId=Number(link.id);
     selectedRoomId=null; selectedTopologyNodeKey=null; selectedManualNodeId=null;
+    const type=TOPOLOGY_LINK_TYPES.find(item=>item[0]===link.link_type)?.[1] || 'Unbekannt';
+    setTopologySaveStatus(`${type} · ${TOPOLOGY_EVIDENCE_LABELS[link.evidence_status] || 'Manuell dokumentiert'}`,'saved');
     document.querySelectorAll('.topology-room-selected,.topology-node-selected').forEach(group =>
         group.classList.remove('topology-room-selected','topology-node-selected'));
     document.querySelectorAll('.topology-manual-link').forEach(group =>
@@ -2196,6 +2372,9 @@ function openTopologyLinkContextMenu(x,y,link,source,target) {
     const evidence=document.createElement('p');
     evidence.textContent=`Evidenzstatus: ${TOPOLOGY_EVIDENCE_LABELS[link.evidence_status] || link.evidence_status}`;
     menu.appendChild(evidence);
+    const routing=document.createElement('p');
+    routing.textContent=link.waypoints?.length ? 'Linienführung: manuell angepasst' : 'Linienführung: automatisch';
+    menu.appendChild(routing);
 
     const typeLabel=document.createElement('label'); typeLabel.textContent='Verbindungstyp';
     const type=document.createElement('select'); type.setAttribute('aria-label','Verbindungstyp');
@@ -2223,6 +2402,16 @@ function openTopologyLinkContextMenu(x,y,link,source,target) {
         setTopologySaveStatus('Verbindung aktualisiert','saved');
         await loadInventoryTopology({preserveGraphOnError:true});
     }));
+    if (link.waypoints?.length) topologyMenuButton('Automatisches Routing wiederherstellen',
+        ()=>void runTopologyAction(async()=>{
+            await topologyManualRequest(
+                `/api/topology/links/${encodeURIComponent(link.id)}?network_id=${encodeURIComponent(networkSelect.value)}`,
+                'PUT',{waypoints:[]}
+            );
+            selectedTopologyLinkId=Number(link.id);
+            setTopologySaveStatus('Automatisches Routing wiederhergestellt','saved');
+            await loadInventoryTopology({preserveGraphOnError:true});
+        }),{secondary:true});
     topologyMenuButton('Verbindung löschen',()=>void runTopologyAction(async()=>{
         await topologyManualRequest(
             `/api/topology/links/${encodeURIComponent(link.id)}?network_id=${encodeURIComponent(networkSelect.value)}`,
@@ -2548,14 +2737,13 @@ function drawTopologyPreview(drag,point) {
     const target=topologyDropTargetAtPoint(centerX,centerY,
         occupied ? new Set([`${gridX}:${gridY}`]) : new Set());
     setTopologyRoomDropPreview(target.valid ? target.room?.id ?? null : null);
-    const group = svgElement('g',{class:`topology-drop-preview${occupied ? ' topology-drop-invalid' : ''}`,
+    const group = svgElement('g',{class:`topology-drop-preview topology-node-manual${occupied ? ' topology-drop-invalid' : ''}`,
         transform:`translate(${centerX},${centerY})`});
-    group.appendChild(svgElement('circle',{r:18,class:'topology-node-background'}));
+    group.appendChild(svgElement('circle',{r:16,class:'topology-node-background'}));
     const icon = createLucideIcon(topologyManualTypes[drag.nodeType].icon);
     for (const [key,value] of Object.entries({x:-9,y:-9,width:18,height:18})) icon.setAttribute(key,value);
     group.appendChild(icon);
-    const label = svgElement('text',{x:0,y:34,'text-anchor':'middle'}); label.textContent = topologyManualTypes[drag.nodeType].label;
-    group.appendChild(label); topologyGraph.appendChild(group);
+    topologyGraph.appendChild(group);
     drag.cell = {grid_x:gridX,grid_y:gridY};
 }
 
@@ -2564,6 +2752,7 @@ function finishTopologyPaletteDrag(event,cancelled=false) {
     if (!drag || event && event.pointerId !== drag.pointerId) return;
     topologyPaletteDrag = null;
     topologyEditorGesture = null;
+    drag.ghost?.remove();
     clearTopologyRoomDropPreview();
     clearTopologyPreview();
     if (drag.button.hasPointerCapture?.(drag.pointerId)) drag.button.releasePointerCapture(drag.pointerId);
@@ -2683,13 +2872,25 @@ for (const [nodeType,design] of Object.entries(topologyManualTypes)) {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'topology-palette-item'; button.title = `${design.label} auf die Zeichenfläche ziehen`;
     button.setAttribute('aria-label',button.title); button.dataset.nodeType = nodeType;
-    button.appendChild(createLucideIcon(design.icon));
+    const iconRing = document.createElement('span');
+    iconRing.className = 'topology-palette-icon';
+    iconRing.appendChild(createLucideIcon(design.icon));
+    button.appendChild(iconRing);
     const label = document.createElement('span'); label.textContent = design.label; button.appendChild(label);
     button.addEventListener('pointerdown',event => {
         if (event.button !== 0 || topologyPaletteDrag || topologyEditorGesture) return;
         closeTopologyContextMenu();
         event.preventDefault();
-        topologyPaletteDrag = {pointerId:event.pointerId,nodeType,button,startX:event.clientX,startY:event.clientY,moved:false,cell:null};
+        const iconBounds = iconRing.getBoundingClientRect();
+        const ghost = iconRing.cloneNode(true);
+        ghost.classList.add('topology-palette-drag-ghost');
+        ghost.setAttribute('aria-hidden','true');
+        ghost.style.left = `${event.clientX-iconBounds.width/2}px`;
+        ghost.style.top = `${event.clientY-iconBounds.height/2}px`;
+        document.body.appendChild(ghost);
+        topologyPaletteDrag = {pointerId:event.pointerId,nodeType,button,ghost,
+            ghostOffsetX:iconBounds.width/2,ghostOffsetY:iconBounds.height/2,
+            startX:event.clientX,startY:event.clientY,moved:false,cell:null};
         topologyEditorGesture = {type:'palette-drag',pointerId:event.pointerId,nodeType,target:button};
         button.setPointerCapture(event.pointerId);
     });
@@ -2719,6 +2920,10 @@ document.addEventListener('pointermove',event => {
     if (!drag.moved && Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY) >= 5) drag.moved = true;
     if (!drag.moved) return;
     const rect = document.querySelector('.topology-viewport').getBoundingClientRect();
+    drag.ghost.style.left = `${event.clientX-drag.ghostOffsetX}px`;
+    drag.ghost.style.top = `${event.clientY-drag.ghostOffsetY}px`;
+    drag.ghost.style.visibility = event.clientX >= rect.left && event.clientX <= rect.right &&
+        event.clientY >= rect.top && event.clientY <= rect.bottom ? 'hidden' : 'visible';
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
         clearTopologyPreview(); clearTopologyRoomDropPreview(); drag.cell = null; return;
     }
@@ -2850,6 +3055,26 @@ function stopTopologyPan() {
 }
 
 const topologyGraph = document.querySelector('#topology-graph');
+// The flex canvas can change size when the surrounding UI changes. SVG's
+// default aspect-ratio alignment otherwise makes an unchanged viewBox appear
+// to pan or zoom. Keep the visible top-left point and scale on resize.
+let topologyGraphSize = null;
+new ResizeObserver(() => {
+    const bounds = topologyGraph.getBoundingClientRect();
+    const next = {width:bounds.width,height:bounds.height};
+    if (next.width <= 0 || next.height <= 0) return;
+    const previous = topologyGraphSize;
+    topologyGraphSize = next;
+    if (!previous || !topologyCameraInitialized ||
+        (Math.abs(previous.width-next.width) < 0.5 &&
+            Math.abs(previous.height-next.height) < 0.5)) return;
+    const box = topologyGraph.viewBox.baseVal;
+    const unitsPerPixel = Math.max(box.width/previous.width,box.height/previous.height);
+    const width = unitsPerPixel*next.width;
+    const height = unitsPerPixel*next.height;
+    topologyGraph.setAttribute('viewBox',`${box.x} ${box.y} ${width} ${height}`);
+    saveTopologyCamera(topologyGraph);
+}).observe(topologyGraph);
 topologyGraph.addEventListener('pointerdown',event=>{
     if (!topologyConnectionArmed || event.button!==0) return;
     if (topologyBeginArmedConnection(event)) return;
@@ -2868,7 +3093,7 @@ topologyGraph.addEventListener('contextmenu',event => event.preventDefault());
 topologyGraph.addEventListener('pointerdown', event => {
     const drawingRoom=topologyToolMode === 'draw-room';
     if (event.button !== 0 || topologyEditorGesture) return;
-    if (!drawingRoom && !event.target.closest?.('.topology-room-handle')) {
+    if (!drawingRoom && !event.target.closest?.('.topology-room-handle,.topology-manual-link')) {
         const room=topologyRoomAtBoundary(event);
         const targetRoom=event.target.closest?.('.topology-room');
         if (room && (!targetRoom || Number(targetRoom.dataset.roomId) !== Number(room.id))) {
@@ -2930,6 +3155,12 @@ topologyGraph.addEventListener('pointermove', event => {
         event.preventDefault(); return;
     }
     if (!topologyPan || event.pointerId !== topologyPan.pointerId) return;
+    // A missed pointerup must never turn ordinary mouse movement into panning.
+    if ((event.buttons & 1) === 0) {
+        stopTopologyPan();
+        saveTopologyCamera(topologyGraph);
+        return;
+    }
     event.preventDefault();
     const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(topologyPan.inverse);
     const {box,start} = topologyPan;
@@ -2978,12 +3209,18 @@ document.querySelector('#topology-reset').addEventListener('click', () => {
     saveTopologyCamera(topologyGraph);
 });
 document.querySelector('#topology-graph').addEventListener('wheel', event => {
+    if (topologyEditorGesture) { event.preventDefault(); return; }
+    const delta=event.deltaY*(event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1);
+    // Horizontal/tiny wheel events are not zoom commands. Trackpads often emit
+    // many small events; scale by their actual distance rather than 10% each.
+    if (!Number.isFinite(delta) || Math.abs(delta) < 1) return;
     event.preventDefault();
-    if (topologyEditorGesture) return;
     const svg = event.currentTarget;
     const box = svg.viewBox.baseVal;
     const baseWidth = Number(topologyBaseViewBox.split(' ')[2]);
-    const width = Math.min(baseWidth*4,Math.max(baseWidth/20,box.width * (event.deltaY > 0 ? 1.1 : 0.9)));
+    const width = Math.min(baseWidth*4,Math.max(baseWidth/20,
+        box.width * Math.exp(Math.max(-120,Math.min(120,delta))*0.001)));
+    if (width === box.width) return;
     const scale = width/box.width;
     const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
     svg.setAttribute('viewBox',`${point.x-(point.x-box.x)*scale} ${point.y-(point.y-box.y)*scale} ${width} ${box.height*scale}`);

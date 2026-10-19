@@ -31,7 +31,7 @@ def daily(network_id: int = Query(..., ge=1), day: date | None = None,
         missing = db.execute("""SELECT device_id,detected_at FROM changes
             WHERE network_id=? AND upper(change_type)='DEVICE_MISSING' ORDER BY detected_at,id""",
             (network_id,)).fetchall()
-        identities = {r['id']: dict(r) for r in db.execute("""SELECT d.id,d.hostname,d.mac,
+        identities = {r['id']: dict(r) for r in db.execute("""SELECT d.id,d.hostname,d.display_name,d.mac,
             (SELECT ip FROM addresses WHERE device_id=d.id AND network_id=?
              ORDER BY last_seen DESC,id DESC LIMIT 1) AS ip FROM devices d
             WHERE EXISTS(SELECT 1 FROM addresses WHERE device_id=d.id AND network_id=?)""",

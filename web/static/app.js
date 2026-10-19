@@ -436,18 +436,17 @@ async function loadNetworks(preserveSelection = false) {
     if (requestId !== networkRequestId) return;
     const current = networkSelect.value;
 
-    networkSelect.replaceChildren(
-        new Option("Netzwerk auswählen", "")
-    );
-
-    for (const network of result.networks) {
-        networkSelect.add(
-            new Option(
-                `${network.customer} / ${network.site} · ${network.cidr} (${network.device_count} Geräte)`,
-                String(network.id)
-            )
-        );
-    }
+    const options = [new Option("Netzwerk auswählen", ""),
+        ...result.networks.map(network => new Option(
+            `${network.customer} / ${network.site} · ${network.cidr} (${network.device_count} Geräte)`,
+            String(network.id)
+        ))];
+    // Replacing an unchanged, possibly focused select can make the browser
+    // scroll the page during an otherwise invisible background refresh.
+    if (networkSelect.options.length !== options.length ||
+        options.some((option, index) => networkSelect.options[index].value !== option.value ||
+            networkSelect.options[index].text !== option.text))
+        networkSelect.replaceChildren(...options);
 
     if (result.networks.length > 0) {
         networkSelect.value = preserveSelection && result.networks.some(n => String(n.id) === current)
@@ -678,6 +677,7 @@ function renderDevices() {
             device.ip,
             device.mac,
             device.hostname,
+            device.display_name,
             device.vendor,
             device.category,
             device.subtype,
@@ -701,7 +701,7 @@ function renderDevices() {
 
         const values = [
             device.ip,
-            device.hostname,
+            device.display_name || device.hostname,
             device.vendor,
             type,
             device.mac,
@@ -820,6 +820,53 @@ function renderDetailTable(container, rows, columns) {
     container.appendChild(wrapper);
 }
 
+function renderLatestDetailTable(container, rows, columns, preferredId = null) {
+    const wasExpanded = container.querySelector('.detail-older')?.open || false;
+    const sorted = [...(rows || [])].sort((a,b) =>
+        String(b.observed_at || '').localeCompare(String(a.observed_at || '')) ||
+        Number(b.id || 0)-Number(a.id || 0));
+    const preferred = preferredId == null ? null :
+        sorted.find(item => String(item.id) === String(preferredId));
+    const featured = preferred || sorted[0];
+    renderDetailTable(container, featured ? [featured] : [], columns);
+    if (preferred) {
+        const label = document.createElement('p');
+        label.className = 'detail-featured-label';
+        label.textContent = 'Aussagekräftigste Evidenz';
+        container.prepend(label);
+    }
+    if (sorted.length <= 1) return;
+    const older = document.createElement('details');
+    older.className = 'detail-older';
+    older.open = wasExpanded;
+    const summary = document.createElement('summary');
+    summary.textContent = `${preferred ? 'Weitere Evidenzen' : 'Ältere Einträge'} anzeigen (${sorted.length-1})`;
+    const content = document.createElement('div');
+    renderDetailTable(content, sorted.filter(item => item !== featured), columns);
+    older.append(summary,content);
+    container.appendChild(older);
+}
+
+function preferredOsEvidenceId(summary) {
+    const family = summary?.family;
+    const kinds = family?.value === 'Linux' || !family
+        ? ['distribution_version','distribution','kernel','family'] : ['family'];
+    const candidates = kinds.map(kind => summary?.[kind]).filter(Boolean);
+    return (candidates.find(claim => !claim.stale) || candidates[0])?.id ?? null;
+}
+
+function readableOsEvidence(claim) {
+    const evidence = claim.evidence || {};
+    const detail = [evidence.name,evidence.value].find(value =>
+        typeof value === 'string' && value.trim());
+    return {
+        ...claim,
+        detected_name: detail || claim.value,
+        confidence_label: claim.confidence == null ? null : `${claim.confidence}%`,
+        evidence_text: JSON.stringify(claim.evidence)
+    };
+}
+
 
 // ==========================================================
 // Veränderungen lesbar darstellen
@@ -928,9 +975,14 @@ async function showDevice(deviceId, scroll = true) {
 
     const requestId = ++detailRequestId;
 
+    const nameInput = document.querySelector('#detail-name');
+    const sameDevice = nameInput.dataset.deviceId === String(deviceId) &&
+        nameInput.dataset.networkId === String(networkId);
     detailPanel.hidden = false;
-    detailTitle.textContent = `Gerät #${deviceId}`;
-    detailSubtitle.textContent = "Lade Informationen ...";
+    if (!sameDevice) {
+        detailTitle.textContent = `Gerät #${deviceId}`;
+        detailSubtitle.textContent = "Lade Informationen ...";
+    }
 
     if (scroll) detailPanel.scrollIntoView({behavior: 'smooth'});
 
@@ -954,7 +1006,7 @@ async function showDevice(deviceId, scroll = true) {
         const presence = data.presence;
 
         detailTitle.textContent =
-            device.hostname ||
+            device.display_name || device.hostname ||
             data.addresses[0]?.ip ||
             `Gerät #${deviceId}`;
 
@@ -970,6 +1022,16 @@ async function showDevice(deviceId, scroll = true) {
         addDetailLine(general, "MAC-Adresse", device.mac);
         addDetailLine(general, "Hersteller", device.vendor);
         addDetailLine(general, "Hostname", device.hostname);
+        const serverName = device.display_name || '';
+        const hasDraft = sameDevice &&
+            nameInput.value !== (nameInput.dataset.serverValue || '');
+        if (!hasDraft && (!sameDevice || document.activeElement !== nameInput))
+            nameInput.value = serverName;
+        nameInput.dataset.deviceId = String(deviceId);
+        nameInput.dataset.networkId = String(networkId);
+        nameInput.dataset.serverValue = serverName;
+        if (!hasDraft)
+            document.querySelector('#detail-name-status').textContent = '';
         addDetailLine(general, "Identität", device.identity_status,eventDesign(device.identity_status));
         addDetailLine(general, "Status", presence?.state,eventDesign(presence?.state));
         addDetailLine(general, "Erstmals gesehen", formatEventTime(device.first_seen));
@@ -992,9 +1054,17 @@ async function showDevice(deviceId, scroll = true) {
             addDetailLine(summary, label, claim ? `${claim.value} · ${displayValue(claim.status)} · ${claim.source}${claim.stale ? ' · veraltet' : ''}` : null);
             if (claim?.conflicting) addDetailLine(summary, 'Weitere Hinweise', claim.alternatives.join('; '));
         }
-        renderDetailTable(document.querySelector('#detail-os-claims'), (data.os_claims || []).slice(0, 100).map(c =>
-            ({...c, evidence_text: JSON.stringify(c.evidence)})), [['kind','Eigenschaft'], ['value','Wert'],
-            ['status','Bewertung'], ['source','Quelle'], ['observed_at','Zeitpunkt'], ['evidence_text','Evidenz']]);
+        const allOsClaims = data.os_claims || [];
+        const preferredOsId = preferredOsEvidenceId(data.os_summary);
+        const shownOsClaims = allOsClaims.slice(0,100);
+        const preferredOsClaim = allOsClaims.find(claim => String(claim.id) === String(preferredOsId));
+        if (preferredOsClaim && !shownOsClaims.some(claim => claim.id === preferredOsClaim.id))
+            shownOsClaims.push(preferredOsClaim);
+        renderLatestDetailTable(document.querySelector('#detail-os-claims'),
+            shownOsClaims.map(readableOsEvidence),
+            [['kind','Eigenschaft'], ['value','Wert'], ['detected_name','Erkannter Treffer'],
+                ['confidence_label','Konfidenz'], ['status','Bewertung'], ['source','Quelle'],
+                ['observed_at','Zeitpunkt'], ['evidence_text','Evidenz']], preferredOsId);
         const identity = document.querySelector('#detail-identity');
         identity.replaceChildren();
         const observation = parseStoredValue(data.last_identity_observation?.data_json) || {};
@@ -1005,7 +1075,7 @@ async function showDevice(deviceId, scroll = true) {
             [['mac','MAC-Adresse'], ['source','Quelle'], ['first_seen','Erstmals'], ['last_seen','Zuletzt']]);
         renderDetailTable(document.querySelector('#detail-identity-candidates'), data.identity_candidates,
             [['candidate_device_id','Mögliche weitere Identität'], ['reason','Grund'], ['status','Status'], ['evidence_json','Evidenz']]);
-        renderDetailTable(document.querySelector('#detail-port-history'), data.port_history,
+        renderLatestDetailTable(document.querySelector('#detail-port-history'), data.port_history,
             [['observed_at','Zeitpunkt'], ['source','Quelle'], ['scan_run_id','Scanlauf'], ['data_json','Gespeicherte Beobachtung']]);
 
         // Klassifikation
@@ -1099,10 +1169,50 @@ function closeDeviceDetails() {
 
     if (!detailPanel) return;
     detailPanel.hidden = true;
+    const nameInput = document.querySelector('#detail-name');
+    delete nameInput.dataset.deviceId;
+    delete nameInput.dataset.networkId;
+    delete nameInput.dataset.serverValue;
 
     // Auswahl beim Schließen entfernen.
     clearSelectedDevice();
 }
+
+document.querySelector('#detail-name-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!selectedDeviceId || !networkSelect.value) return;
+    const deviceId = selectedDeviceId;
+    const networkId = networkSelect.value;
+    const input = document.querySelector('#detail-name');
+    const status = document.querySelector('#detail-name-status');
+    const button = event.currentTarget.querySelector('button');
+    const submittedName = input.value;
+    button.disabled = true;
+    status.textContent = 'Speichere …';
+    try {
+        const headers = {'Content-Type':'application/json'};
+        const apiKey = document.querySelector('#api-key').value;
+        if (apiKey) headers['X-Netchecker-Key'] = apiKey;
+        const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/name?network_id=${encodeURIComponent(networkId)}`,
+            {method:'PUT',cache:'no-store',headers,body:JSON.stringify({display_name:submittedName})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `HTTP ${response.status}`);
+        if (selectedDeviceId !== deviceId || networkSelect.value !== networkId) return;
+        const newerDraft = input.value !== submittedName;
+        if (!newerDraft) input.value = result.display_name || '';
+        input.dataset.serverValue = result.display_name || '';
+        for (const device of devices) if (String(device.id) === deviceId) device.display_name = result.display_name;
+        renderDevices();
+        const current = devices.find(device => String(device.id) === deviceId);
+        detailTitle.textContent = result.display_name || current?.hostname || current?.ip || `Gerät #${deviceId}`;
+        status.textContent = newerDraft ? 'Name gespeichert; neuer Entwurf noch offen.' : 'Name gespeichert.';
+    } catch (error) {
+        if (selectedDeviceId === deviceId && networkSelect.value === networkId)
+            status.textContent = `Speichern fehlgeschlagen: ${error.message}`;
+    } finally {
+        button.disabled = false;
+    }
+});
 
 networkSelect.addEventListener("change", () => {
     ++networkRequestId;

@@ -260,6 +260,30 @@ class WebTest(unittest.TestCase):
             self.assertEqual(kind,edited['link']['link_type'])
             self.assertEqual('Dokumentiert im Rackplan',edited['link']['description'])
             self.assertEqual('manual_documented',edited['link']['evidence_status'])
+        link_url=f'/api/topology/links/{first["link"]["id"]}?network_id={self.network}'
+        waypoints=[{'x':12,'y':0},{'x':12,'y':20},{'x':40,'y':20}]
+        status,edited=self.put(link_url,{'waypoints':waypoints})
+        self.assertEqual(200,status)
+        self.assertEqual(waypoints,edited['link']['waypoints'])
+        self.assertEqual('manual_documented',edited['link']['evidence_status'])
+        self.assertEqual(waypoints,next(link for link in self.request(layout_url)[1]['links']
+            if link['id']==first['link']['id'])['waypoints'])
+        self.assertEqual(waypoints,next(link for link in self.request(
+            f'/api/topology/links?network_id={self.network}&layout_id={layout_id}')[1]['links']
+            if link['id']==first['link']['id'])['waypoints'])
+        status,edited=self.put(link_url,{'link_type':'fiber'})
+        self.assertEqual(200,status)
+        self.assertEqual(waypoints,edited['link']['waypoints'])
+        for invalid in ([{'x':0,'y':0},{'x':1,'y':1}],
+                        [{'x':0,'y':0},{'x':0,'y':0}],
+                        [{'x':True,'y':0}],
+                        [{'x':0,'y':0}]*129):
+            self.assertEqual(422,self.put(link_url,{'waypoints':invalid})[0])
+        self.assertEqual(waypoints,self.request(layout_url)[1]['links'][0]['waypoints'])
+        status,restored=self.put(link_url,{'waypoints':[]})
+        self.assertEqual(200,status)
+        self.assertEqual([],restored['link']['waypoints'])
+        self.assertEqual([],self.request(layout_url)[1]['links'][0]['waypoints'])
         self.assertEqual(422,self.put(
             f'/api/topology/links/{first["link"]["id"]}?network_id={self.network}',
             {'evidence_status':'observed'},
@@ -348,6 +372,51 @@ class WebTest(unittest.TestCase):
         other_layout=other_saved['layout']['id']
         self.assertEqual(404,self.post(url,{**base,'layout_id':other_layout,
             'target':{'manual_node_id':999999,'anchor':'left'}})[0])
+
+    def test_manual_link_waypoints_survive_device_and_parent_room_moves(self):
+        layout_url=f'/api/topology/layout?network_id={self.network}'
+        status,saved=self.put(layout_url,{'layout_id':None,'positions':[
+            {'device_id':self.ids[0],'grid_x':5,'grid_y':5},
+            {'device_id':self.ids[1],'grid_x':6,'grid_y':5},
+        ]})
+        self.assertEqual(200,status)
+        layout_id=saved['layout']['id']
+        status,created=self.post(f'/api/topology/rooms?network_id={self.network}',{
+            'layout_id':layout_id,'name':'Elternraum','grid_x':0,'grid_y':0,
+            'grid_width':15,'grid_height':15,'grid_cell_width':400,'grid_cell_height':360,
+        })
+        self.assertEqual(200,status)
+        room_id=created['room']['id']
+        for device_id in self.ids[:2]:
+            self.assertEqual(200,self.put(
+                f'/api/topology/rooms/assignment?network_id={self.network}&layout_id={layout_id}',
+                {'room_id':room_id,'device_id':device_id})[0])
+        status,created=self.post(f'/api/topology/links?network_id={self.network}',{
+            'layout_id':layout_id,
+            'source':{'device_id':self.ids[0],'anchor':'auto'},
+            'target':{'device_id':self.ids[1],'anchor':'auto'},
+        })
+        self.assertEqual(201,status)
+        link_id=created['link']['id']
+        offsets=[{'x':20,'y':0},{'x':20,'y':30},{'x':60,'y':30}]
+        self.assertEqual(200,self.put(
+            f'/api/topology/links/{link_id}?network_id={self.network}',
+            {'waypoints':offsets})[0])
+        self.assertEqual(200,self.put(
+            f'/api/topology/rooms/{room_id}/geometry?network_id={self.network}',
+            {'grid_x':2,'grid_y':3,'grid_width':15,'grid_height':15,'move_contents':True})[0])
+        after_room=self.request(layout_url)[1]
+        moved={item['device_id']:(item['grid_x'],item['grid_y'])
+               for item in after_room['positions']}
+        self.assertEqual((7,8),moved[self.ids[0]])
+        self.assertEqual((8,8),moved[self.ids[1]])
+        self.assertEqual(offsets,after_room['links'][0]['waypoints'])
+        self.assertEqual(200,self.put(layout_url,{'layout_id':layout_id,'positions':[
+            {'device_id':self.ids[1],'grid_x':9,'grid_y':8},
+        ]})[0])
+        after_device=self.request(layout_url)[1]
+        self.assertEqual(offsets,after_device['links'][0]['waypoints'])
+        self.assertEqual('manual_documented',after_device['links'][0]['evidence_status'])
 
     def test_unplacing_device_removes_only_its_layout_and_room_membership(self):
         layout_url=f'/api/topology/layout?network_id={self.network}'
@@ -1392,8 +1461,8 @@ class WebTest(unittest.TestCase):
         self.assertIn('descendantRooms:descendants,subtreeIds',script)
         self.assertIn('setRoomShape(group,movedRoom,rect,label,null,state.internalLinkIds);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
-        self.assertIn('/static/topology.js?v=interactive-links-29',template)
-        self.assertIn('/static/style.css?v=topology-links-13',template)
+        self.assertIn('/static/topology.js?v=manual-segments-2',template)
+        self.assertIn('/static/style.css?v=topology-manual-routing-2',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
         self.assertNotIn('.topology-help',style)
@@ -1403,7 +1472,7 @@ class WebTest(unittest.TestCase):
         self.assertIn('.topology-unplaced-list { display:flex; flex-wrap:wrap;',style)
         self.assertIn('.topology-unplaced-content[hidden] { display:none; }',style)
         self.assertNotIn('topology-unplaced-list { overflow',style)
-        self.assertIn("[device.ip,device.hostname,device.category,design.label]",script)
+        self.assertIn("[device.ip,device.hostname,device.display_name,device.category,design.label]",script)
         self.assertIn("topologyPresenceDesign(node.device.presence)",script)
         self.assertIn("`Nicht platzierte Geräte (${topologyUnplacedDevices.length})`",script)
         self.assertNotIn('updateTopologyViewportHeight',script)
@@ -1458,11 +1527,12 @@ class WebTest(unittest.TestCase):
         self.assertIn("const preferredAxis=Math.abs(target.x-source.x)>=Math.abs(target.y-source.y) ? 'x' : 'y';",script)
         self.assertIn('const anchorRouteForEdge=(edge,sourceSides,targetSides,geometry,maxTurns,preview,roomClearance)=>{',script)
         self.assertIn('window.TopologyRouting.anchorRouteCandidates(',script)
+
         self.assertIn('window.TopologyRouting.validAnchorRoute(',script)
         self.assertIn('function validAnchorRoute(points,nodeRects=[],roomRects=[]',router)
         self.assertIn('routeFollowsRoomBoundary(from,to,rect,roomClearance)',router)
         self.assertIn('const roomClearance={x:topologyGridSpacing.column/2,y:topologyGridSpacing.row/2};',script)
-        self.assertIn('let best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
+        self.assertIn('if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
         self.assertIn('if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,2,liveMove,roomClearance);',script)
         self.assertIn('function anchorRouteCandidates(source,target,',router)
         self.assertIn('const before=orthogonalPathMetrics(raw);',router)
@@ -1490,7 +1560,7 @@ class WebTest(unittest.TestCase):
         self.assertIn("edge.hitPathElement.setAttribute('points',path);",script)
         self.assertIn("group.addEventListener('click',event=>{event.stopPropagation();selectTopologyLink(edge.link);});",script)
         self.assertIn("group.addEventListener('pointerdown',event=>{",script)
-        self.assertIn('event.preventDefault(); event.stopPropagation();\n            selectTopologyLink(edge.link);',script)
+        self.assertIn('const wasSelected=selectedTopologyLinkId===Number(edge.link.id);\n            selectTopologyLink(edge.link);',script)
         self.assertIn("group.addEventListener('contextmenu',event=>{",script)
         self.assertIn("/api/topology/links/${encodeURIComponent(link.id)}?network_id=",script)
         self.assertIn('.topology-connection-target-valid',style)
@@ -1498,11 +1568,11 @@ class WebTest(unittest.TestCase):
         self.assertIn('#topology-graph.topology-connection-armed .topology-room-grip-nw',style)
         self.assertNotIn('.topology-connection-grip',style)
         self.assertIn('port.localAnchorPoint={x,y};',script)
-        self.assertIn('const portAnchor=visual.ports.get(side)?.localAnchorPoint;',script)
+        self.assertIn('const manualLinkAnchor=(object,side,opposite=null)=>{',script)
         self.assertIn('topologyGraph.setPointerCapture(event.pointerId);',script)
         self.assertIn('const sourceSides=edge.a.kind===\'node\' && edge.link.source.anchor===\'auto\'',script)
         self.assertIn('best=window.TopologyRouting.chooseOrthogonalRoute(candidates);',script)
-        self.assertIn('let best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
+        self.assertIn('if (!best) best=anchorRouteForEdge(edge,sourceSides,targetSides,anchorGeometry,1,liveMove,roomClearance);',script)
         self.assertIn('const scheduleManualLinkRedraw=(change={all:true})=>{',script)
         self.assertIn('const dirtyEdges=manualEdges.filter(isDirty);',script)
         self.assertIn('redraw([node],{nodes:[node]',script)
@@ -1516,8 +1586,8 @@ class WebTest(unittest.TestCase):
         node_bounds=script.split('function topologyNodePixelBounds(node)',1)[1].split('function topologyRoomResizeLimits',1)[0]
         self.assertNotIn('connection-grip',node_bounds)
         self.assertIn('const measured=child.getBBox();',node_bounds)
-        self.assertIn('topology-routing.js?v=geometry-a-star-12',template)
-        self.assertIn('/static/topology.js?v=interactive-links-29',template)
+        self.assertIn('topology-routing.js?v=manual-segments-2',template)
+        self.assertIn('/static/topology.js?v=manual-segments-2',template)
         self.assertIn("console.error(`Topologiefehler während „${loadPhase}“`,error)",script)
         self.assertIn("const apiFailure = loadPhase !== 'Topologie darstellen'",script)
         self.assertIn('const connectionPoints={top:points.n,right:points.e,bottom:points.s,left:points.w};',script)
@@ -1540,6 +1610,31 @@ class WebTest(unittest.TestCase):
         self.assertIn('A parallel route two pixels from the room frame violates the half-cell clearance',harness)
         self.assertIn('Exact fractional anchors are routed without grid conversion',harness)
         self.assertIn('The pixel fallback keeps two bends around a device obstacle',harness)
+
+    def test_topology_manual_segments_use_existing_links_and_canvas_coordinates(self):
+        root=Path(__file__).parents[1]
+        script=(root/'web/static/topology.js').read_text()
+        style=(root/'web/static/style.css').read_text()
+        for feature in ('beginTopologySegmentDrag(edge,group,event)',
+                        "type:'link-segment'", 'moveTopologySegmentDrag(event)',
+                        'finishTopologySegmentDrag(event)',
+                        'topologySvgPoint(event.clientX,event.clientY)',
+                        'window.TopologyRouting.shiftOrthogonalSegment(',
+                        'window.TopologyRouting.validAnchorRoute(',
+                        'window.TopologyRouting.routeThroughWaypoints(',
+                        "'PUT',{waypoints}", "'PUT',{waypoints:[]}",
+                        'Automatisches Routing wiederherstellen',
+                        "for (const name of ['pointerup','pointercancel','lostpointercapture'])",
+                        'else if (topologyEditorGesture) cancelTopologyGesture();'):
+            self.assertIn(feature,script)
+        for kind in ('ethernet','fiber','wifi','logical','unknown'):
+            self.assertIn(f'.topology-link-type-{kind} .topology-manual-link-path',style)
+        self.assertIn('Evidenzstatus:',script)
+        self.assertIn('topology-link-evidence-',script)
+        self.assertIn('x:object.node.x,y:object.node.y,normal',script)
+        self.assertIn('point[axis]-state.start[axis],initial,spacing',script)
+        self.assertIn('{allowSelfIntersections:true}',script)
+        self.assertIn('absoluteWaypoints,{unrestricted:true}',script)
 
     def test_timeline_midnight_missing_and_explicit_port_close(self):
         connection = sqlite3.connect(self.path)

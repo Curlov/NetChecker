@@ -1,6 +1,7 @@
 """Historical topology and per-network layout API."""
 import ipaddress
 import json
+import math
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -253,14 +254,42 @@ class TopologyLinkCreate(BaseModel):
         extra = 'forbid'
 
 
+class TopologyWaypoint(BaseModel):
+    """Canvas-unit offset from the current source anchor of a manual link."""
+    x: float
+    y: float
+
+    @validator('x', 'y', pre=True)
+    def validate_coordinate(cls, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or \
+                not math.isfinite(value) or abs(value) > 10000000:
+            raise ValueError('Zwischenpunkte benötigen endliche Koordinaten')
+        return value
+
+    class Config:
+        extra = 'forbid'
+
+
 class TopologyLinkUpdate(BaseModel):
     link_type: TopologyLinkType | None = None
     label: str | None = Field(default=None, max_length=120, strict=True)
     description: str | None = Field(default=None, max_length=2000, strict=True)
+    waypoints: list[TopologyWaypoint] | None = Field(default=None, max_length=128)
 
     @validator('label')
     def normalize_link_label(cls, value):
         return value.strip() if value is not None else value
+
+    @validator('waypoints')
+    def validate_waypoints(cls, value):
+        if value is None:
+            return value
+        for before, after in zip(value, value[1:]):
+            if before.x == after.x and before.y == after.y:
+                raise ValueError('Zwischenpunkte dürfen sich nicht wiederholen')
+            if before.x != after.x and before.y != after.y:
+                raise ValueError('Zwischenpunkte müssen orthogonal verbunden sein')
+        return value
 
     class Config:
         extra = 'forbid'
@@ -1553,7 +1582,7 @@ def update_layout_link(
     payload: TopologyLinkUpdate,
     network_id: int = Query(..., ge=1),
 ):
-    """Edit documentation fields without changing link evidence provenance."""
+    """Edit documentation and manual routing without changing evidence provenance."""
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(422, 'Keine Verbindungsänderung angegeben')
@@ -1572,11 +1601,14 @@ def update_layout_link(
             raise HTTPException(404, 'Verbindung gehört nicht zum gewählten Netzwerk')
         fields = {
             'link_type':'link_type', 'label':'label', 'description':'description',
+            'waypoints':'waypoints_json',
         }
         assignments = ','.join(f'{column}=?' for column in (fields[key] for key in changes))
+        values = [json.dumps(value, separators=(',',':')) if key == 'waypoints' else value
+                  for key, value in changes.items()]
         db.execute(
             f'UPDATE topology_layout_links SET {assignments},updated_at=CURRENT_TIMESTAMP WHERE id=?',
-            (*changes.values(),link_id),
+            (*values,link_id),
         )
         db.execute(
             'UPDATE topology_layouts SET updated_at=CURRENT_TIMESTAMP WHERE id=?',

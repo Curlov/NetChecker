@@ -66,6 +66,6 @@ def get_write_connection():
         raise
     except sqlite3.Error as error:
         connection.rollback()
-        raise HTTPException(status_code=503, detail='Topologielayout konnte nicht gespeichert werden') from error
+        raise HTTPException(status_code=503, detail='Änderung konnte nicht gespeichert werden') from error
     finally:
         connection.close()

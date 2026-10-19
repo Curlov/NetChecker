@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -1582,6 +1582,8 @@ def initialize_database(connection):
                 migrate_topology_layout_links(connection)
             if version < 12:
                 migrate_topology_auto_link_anchors(connection)
+            if version < 13:
+                ensure_column(connection, 'devices', 'display_name', 'TEXT')
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

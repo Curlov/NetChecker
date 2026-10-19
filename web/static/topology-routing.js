@@ -219,6 +219,101 @@
         return true;
     }
 
+    function validEndpointDirections(points,source,target) {
+        if (!isOrthogonalPath(points) || points.length<2) return false;
+        const first=points[1],last=points.at(-2);
+        return (first.x-source.x)*source.normal.x+(first.y-source.y)*source.normal.y>0 &&
+            (target.x-last.x)*target.normal.x+(target.y-last.y)*target.normal.y<0;
+    }
+
+    function selfIntersects(points) {
+        for (let i=1;i<points.length;i++) for (let j=i+2;j<points.length;j++) {
+            const a=points[i-1],b=points[i],c=points[j-1],d=points[j];
+            if (a.x===b.x && c.x===d.x) {
+                if (a.x===c.x && Math.max(Math.min(a.y,b.y),Math.min(c.y,d.y))<=
+                    Math.min(Math.max(a.y,b.y),Math.max(c.y,d.y))) return true;
+            } else if (a.y===b.y && c.y===d.y) {
+                if (a.y===c.y && Math.max(Math.min(a.x,b.x),Math.min(c.x,d.x))<=
+                    Math.min(Math.max(a.x,b.x),Math.max(c.x,d.x))) return true;
+            } else {
+                const vertical=a.x===b.x ? [a,b] : [c,d];
+                const horizontal=a.y===b.y ? [a,b] : [c,d];
+                if (vertical[0].x>=Math.min(horizontal[0].x,horizontal[1].x) &&
+                    vertical[0].x<=Math.max(horizontal[0].x,horizontal[1].x) &&
+                    horizontal[0].y>=Math.min(vertical[0].y,vertical[1].y) &&
+                    horizontal[0].y<=Math.max(vertical[0].y,vertical[1].y)) return true;
+            }
+        }
+        return false;
+    }
+
+    function shiftOrthogonalSegment(points,index,coordinate,leadSize=12,
+        {allowSelfIntersections=false}={}) {
+        if (!isOrthogonalPath(points) || points.length<2 || !Number.isInteger(index) ||
+            index<0 || index>=points.length-1 || !Number.isFinite(coordinate)) return null;
+        const a=points[index],b=points[index+1];
+        const horizontal=a.y===b.y && a.x!==b.x;
+        const vertical=a.x===b.x && a.y!==b.y;
+        if (!horizontal && !vertical) return null;
+        const axis=horizontal ? 'x' : 'y',cross=horizontal ? 'y' : 'x';
+        if (coordinate===a[cross]) return points.map(point=>({...point}));
+        const distance=Math.abs(b[axis]-a[axis]);
+        const lead=Math.min(Math.abs(leadSize),distance/4);
+        if (lead<=0) return null;
+        const direction=Math.sign(b[axis]-a[axis]);
+        const first=index===0,last=index===points.length-2;
+        const startStub={...a,[axis]:a[axis]+direction*lead};
+        const endStub={...b,[axis]:b[axis]-direction*lead};
+        const movedA={...(first ? startStub : a),[cross]:coordinate};
+        const movedB={...(last ? endStub : b),[cross]:coordinate};
+        const shifted=[...points.slice(0,index),...(first ? [a,startStub] : []),movedA,movedB,
+            ...(last ? [endStub,b] : []),...points.slice(index+2)];
+        const result=simplify(shifted);
+        return isOrthogonalPath(result) && (allowSelfIntersections || !selfIntersects(result))
+            ? result : null;
+    }
+
+    function snapSegmentCoordinate(initial,delta,origin,spacing) {
+        if (![initial,delta,origin,spacing].every(Number.isFinite) || spacing<=0) return null;
+        return origin+Math.round((initial+delta-origin)/spacing)*spacing;
+    }
+
+    function routeThroughWaypoints(source,target,waypoints,{nodeRects=[],roomRects=[],
+        startIds=new Set(),endIds=new Set(),roomClearance={x:0,y:0},unrestricted=false}={}) {
+        if (!Array.isArray(waypoints) || !waypoints.length || waypoints.length>128 ||
+            !waypoints.every(point=>Number.isFinite(point?.x) && Number.isFinite(point?.y))) return null;
+        const start={x:source.x,y:source.y},end={x:target.x,y:target.y};
+        const fixed=waypoints.map(point=>({
+            x:Math.abs(point.x-source.x)<1e-7 ? source.x :
+                Math.abs(point.x-target.x)<1e-7 ? target.x : point.x,
+            y:Math.abs(point.y-source.y)<1e-7 ? source.y :
+                Math.abs(point.y-target.y)<1e-7 ? target.y : point.y
+        }));
+        const valid=points=>isOrthogonalPath(points) && (unrestricted ||
+            !selfIntersects(points) && validEndpointDirections(points,source,target) &&
+            validAnchorRoute(points,nodeRects,roomRects,startIds,endIds,roomClearance));
+        const direct=simplify([start,...fixed,end]);
+        if (valid(direct)) return direct;
+        if (!isOrthogonalPath(fixed)) return null;
+        const normals=DIRECTIONS.map(({x,y})=>({x,y}));
+        const first=fixed[0],last=fixed.at(-1);
+        const simpleLeads=(a,b)=>a.x===b.x || a.y===b.y ? [[a,b]] : [
+            [a,{x:b.x,y:a.y},b],[a,{x:a.x,y:b.y},b]
+        ];
+        const starts=unrestricted ? simpleLeads(start,first) :
+            normals.flatMap(normal=>anchorRouteCandidates(source,{...first,normal},
+                {maxTurns:2}).slice(0,2).map(candidate=>candidate.points));
+        const ends=unrestricted ? simpleLeads(last,end) :
+            normals.flatMap(normal=>anchorRouteCandidates({...last,normal},target,
+                {maxTurns:2}).slice(0,2).map(candidate=>candidate.points));
+        const candidates=[];
+        for (const lead of starts) for (const tail of ends) {
+            const points=simplify([...lead,...fixed.slice(1,-1),...tail]);
+            if (valid(points)) candidates.push({points});
+        }
+        return chooseOrthogonalRoute(candidates)?.points || null;
+    }
+
     function routeOrthogonalPixels(source,target,{nodeRects=[],roomRects=[],
         startIds=new Set(),endIds=new Set(),roomClearance={x:0,y:0}}={}) {
         if (![source?.x,source?.y,target?.x,target?.y,source?.normal?.x,
@@ -591,7 +686,8 @@
 
     const api={routeOrthogonalGrid,isOrthogonalPath,orthogonalAnchorLead,joinOrthogonalRoute,
         anchorRouteCandidates,validAnchorRoute,routeOrthogonalPixels,
-        orthogonalPathMetrics,chooseOrthogonalRoute};
+        orthogonalPathMetrics,chooseOrthogonalRoute,shiftOrthogonalSegment,snapSegmentCoordinate,
+        routeThroughWaypoints,validEndpointDirections,selfIntersects};
     if (typeof module!=='undefined' && module.exports) module.exports=api;
     root.TopologyRouting=api;
 })(typeof globalThis!=='undefined' ? globalThis : this);

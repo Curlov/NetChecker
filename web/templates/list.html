@@ -24,7 +24,7 @@
                 <thead>
                     <tr>
                         <th>IP-Adresse</th>
-                        <th>Hostname</th>
+                        <th>Name / Hostname</th>
                         <th>Hersteller</th>
                         <th>Gerätetyp</th>
                         <th>MAC-Adresse</th>
@@ -59,6 +59,12 @@
         <article class="detail-card">
             <h3>Geräteinformationen</h3>
             <div id="detail-general"></div>
+            <form id="detail-name-form" class="detail-name-form">
+                <label for="detail-name">Gerätename</label>
+                <div><input id="detail-name" name="display_name" type="text" maxlength="120" autocomplete="off" placeholder="Eigener Gerätename">
+                <button type="submit">Speichern</button></div>
+                <span id="detail-name-status" role="status" aria-live="polite"></span>
+            </form>
         </article>
 
         <article class="detail-card">

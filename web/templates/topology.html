@@ -5,7 +5,13 @@
         <span id="topology-save-status" class="topology-save-status" role="status" aria-live="polite">Layout noch nicht geladen</span>
     </div>
     <div id="topology-palette" class="topology-palette" role="toolbar" aria-label="Objektpalette">
-        <button id="topology-room-tool" class="topology-palette-item" type="button" aria-pressed="false" title="Rechteckige Räume auf dem Raster zeichnen">Raum zeichnen</button>
+        <button id="topology-room-tool" class="topology-palette-item" type="button" aria-pressed="false" title="Rechteckige Räume auf dem Raster zeichnen">
+            <span class="topology-palette-icon topology-palette-room-icon" aria-hidden="true">
+                <svg class="lucide-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 3h18v18H3zM3 10h10v11M13 10h8"/>
+                </svg>
+            </span><span>Raum zeichnen</span>
+        </button>
     </div>
     <section id="topology-unplaced" class="topology-unplaced" aria-label="Nicht platzierte Geräte">
         <div class="topology-unplaced-heading">
@@ -13,7 +19,7 @@
                 aria-expanded="true" aria-controls="topology-unplaced-content">Nicht platzierte Geräte (0)</button>
             <label class="topology-unplaced-search-label" for="topology-unplaced-search">Suche</label>
             <input id="topology-unplaced-search" class="topology-unplaced-search" type="search"
-                placeholder="IP, Hostname oder Typ" autocomplete="off" aria-label="Nicht platzierte Geräte suchen">
+                placeholder="IP, Name, Hostname oder Typ" autocomplete="off" aria-label="Nicht platzierte Geräte suchen">
         </div>
         <div id="topology-unplaced-content" class="topology-unplaced-content">
             <div id="topology-unplaced-list" class="topology-unplaced-list" role="list"

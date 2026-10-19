@@ -3,7 +3,8 @@
 const assert=require('node:assert/strict');
 const {routeOrthogonalGrid}=require('../web/static/topology-routing.js');
 const {isOrthogonalPath,orthogonalAnchorLead,joinOrthogonalRoute,anchorRouteCandidates,validAnchorRoute,chooseOrthogonalRoute,
-    orthogonalPathMetrics,routeOrthogonalPixels}=
+    orthogonalPathMetrics,routeOrthogonalPixels,shiftOrthogonalSegment,snapSegmentCoordinate,
+    routeThroughWaypoints,validEndpointDirections,selfIntersects}=
     require('../web/static/topology-routing.js');
 
 const route=(start,end,options)=>routeOrthogonalGrid(start,end,options);
@@ -25,6 +26,65 @@ const visitedCells=points=>{
     return cells;
 };
 const assertOrthogonal=(points,message)=>assert.ok(isOrthogonalPath(points),message);
+const manualStart={x:0,y:0,normal:{x:1,y:0}};
+const manualEnd={x:100,y:100,normal:{x:0,y:-1}};
+const manualBase=[{x:0,y:0},{x:100,y:0},{x:100,y:100}];
+const movedHorizontal=shiftOrthogonalSegment(manualBase,0,20,12);
+const movedVertical=shiftOrthogonalSegment(manualBase,1,120,12);
+for (const moved of [movedHorizontal,movedVertical]) {
+    assertOrthogonal(moved,'Dragging a segment never introduces a diagonal');
+    assert.deepEqual(moved[0],manualBase[0],'The source remains anchored');
+    assert.deepEqual(moved.at(-1),manualBase.at(-1),'The target remains anchored');
+    assert.ok(validEndpointDirections(moved,manualStart,manualEnd),
+        'The source and target directions remain valid');
+    assert.ok(!selfIntersects(moved),'A moved segment does not fold over itself');
+}
+assert.ok(movedHorizontal.some(point=>point.y===20));
+assert.ok(movedVertical.some(point=>point.x===120));
+assert.equal(snapSegmentCoordinate(0,16,0,20),20,'Segment motion snaps to the canvas grid');
+assert.equal(snapSegmentCoordinate(0,9,0,20),0,'Sub-grid pointer motion does not move the route');
+assert.equal(snapSegmentCoordinate(0,9,0,0),null,'Invalid grid spacing is rejected');
+const iconCenterY=47,cellCenterY=60,rowSpacing=48;
+assert.equal(snapSegmentCoordinate(iconCenterY,rowSpacing,iconCenterY,rowSpacing),
+    iconCenterY+rowSpacing,'Manual snapping keeps the icon center grid phase');
+assert.notEqual(snapSegmentCoordinate(iconCenterY,rowSpacing,cellCenterY,rowSpacing),
+    iconCenterY+rowSpacing,'The cell center phase would move the line off the icon');
+const iconLine=[{x:90,y:iconCenterY},{x:310,y:iconCenterY}];
+const movedIconLine=shiftOrthogonalSegment(iconLine,0,iconCenterY+rowSpacing,12,
+    {allowSelfIntersections:true});
+assertOrthogonal(movedIconLine,'Manual icon connection stays orthogonal');
+assert.deepEqual(movedIconLine[0],iconLine[0],'Manual route starts at the icon center');
+assert.deepEqual(movedIconLine.at(-1),iconLine.at(-1),
+    'Manual route ends at the other icon center');
+const editedWaypoints=movedHorizontal.slice(1,-1);
+assert.deepEqual(routeThroughWaypoints(manualStart,manualEnd,editedWaypoints),movedHorizontal,
+    'Saved manual vertices reconstruct the exact route');
+const shift=50;
+const translatedStart={...manualStart,x:manualStart.x+shift};
+const translatedEnd={...manualEnd,x:manualEnd.x+shift};
+const translatedWaypoints=editedWaypoints.map(point=>({x:point.x+shift,y:point.y}));
+assert.deepEqual(routeThroughWaypoints(translatedStart,translatedEnd,translatedWaypoints),
+    movedHorizontal.map(point=>({x:point.x+shift,y:point.y})),
+    'A parent-room move preserves source-relative manual routing');
+const movedTarget={...manualEnd,x:120};
+const reconnected=routeThroughWaypoints(manualStart,movedTarget,editedWaypoints);
+assert.ok(reconnected && isOrthogonalPath(reconnected),
+    'Moving one endpoint reconnects the saved vertices orthogonally');
+assert.deepEqual(reconnected.at(-1),{x:120,y:100});
+const blockingNode=[{rect:{x:45,y:15,width:10,height:10}}];
+assert.equal(validAnchorRoute(movedHorizontal,blockingNode),false,
+    'A segment drag into another device or label is rejected');
+const manualDragForeignRoom=[{id:5,rect:{x:45,y:15,width:10,height:10}}];
+assert.equal(validAnchorRoute(movedHorizontal,[],manualDragForeignRoom),false,
+    'A segment drag through a foreign room is rejected');
+assert.equal(routeThroughWaypoints(manualStart,manualEnd,editedWaypoints,
+    {nodeRects:blockingNode}),null,'Invalid saved routing safely falls back to the automatic router');
+assert.deepEqual(routeThroughWaypoints(manualStart,manualEnd,editedWaypoints,
+    {nodeRects:blockingNode,roomRects:manualDragForeignRoom,unrestricted:true}),
+    movedHorizontal,'Manual routing keeps the user-selected line through obstacles and rooms');
+const automaticFallback=routeOrthogonalPixels(manualStart,manualEnd,{nodeRects:blockingNode});
+assert.ok(automaticFallback && validAnchorRoute(automaticFallback,blockingNode),
+    'The existing automatic router supplies a safe orthogonal fallback');
 const cellsInRect=(left,top,right,bottom)=>{
     const cells=[];
     for (let x=left;x<=right;x++) for (let y=top;y<=bottom;y++) cells.push([x,y]);

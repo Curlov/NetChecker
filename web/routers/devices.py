@@ -2,8 +2,9 @@
 import ipaddress
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
-from web.database import get_connection
+from web.database import get_connection, get_write_connection
 from database import get_port_inventory, get_os_history, get_os_claims, get_os_claims_for_devices
 from os_analysis import summarize_claims
 from mac_analysis import analyze_mac
@@ -14,6 +15,10 @@ router = APIRouter(
     prefix="/api/devices",
     tags=["Devices"]
 )
+
+
+class DeviceNameUpdate(BaseModel):
+    display_name: str | None
 
 
 # ==========================================================
@@ -86,6 +91,7 @@ def get_devices(
             d.mac,
             d.vendor,
             d.hostname,
+            d.display_name,
             d.identity_status,
             d.first_seen,
             d.last_seen,
@@ -163,6 +169,23 @@ def get_devices(
         "sort": "ip_asc",
         "devices": page
     }
+
+
+@router.put('/{device_id}/name')
+def update_device_name(device_id: int, payload: DeviceNameUpdate,
+                       network_id: int = Query(..., ge=1)):
+    name = payload.display_name.strip() if payload.display_name is not None else None
+    if name and (len(name) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+        raise HTTPException(422, 'Gerätename darf höchstens 120 Zeichen und keine Steuerzeichen enthalten')
+    with get_write_connection() as db:
+        require_network(db, network_id)
+        device = db.execute('''SELECT d.id FROM devices d WHERE d.id=? AND EXISTS
+            (SELECT 1 FROM addresses a WHERE a.device_id=d.id AND a.network_id=?)''',
+            (device_id, network_id)).fetchone()
+        if device is None:
+            raise HTTPException(404, 'Gerät in diesem Netzwerk nicht gefunden')
+        db.execute('UPDATE devices SET display_name=? WHERE id=?', (name or None, device_id))
+    return {'device_id': device_id, 'display_name': name or None}
 
 
 # ==========================================================
@@ -258,7 +281,8 @@ def get_device(
         os_claims = get_os_claims(db, network_id, device_id)
         port_history = db.execute("""SELECT source,observed_at,scan_run_id,data_json
             FROM observations WHERE network_id=? AND device_id=?
-            AND observation_type IN ('tcp_port_scan','service_scan') ORDER BY id DESC LIMIT 100""",
+            AND observation_type IN ('tcp_port_scan','service_scan')
+            ORDER BY observed_at DESC,id DESC LIMIT 100""",
             (network_id,device_id)).fetchall()
         identity_candidates = db.execute("""SELECT * FROM identity_candidates
             WHERE network_id=? AND (device_id=? OR candidate_device_id=?) ORDER BY id DESC LIMIT 50""",
