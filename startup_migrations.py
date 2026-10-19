@@ -6,7 +6,7 @@ import sqlite3
 
 from logging_utils import event
 from runtime_lock import inventory_lock
-from schema import SCHEMA_VERSION, initialize_database, validate_schema
+from schema import SCHEMA_VERSION, initialize_database, schema_repair_needed, validate_schema
 
 def _has_application_tables(connection):
     return connection.execute(
@@ -29,7 +29,7 @@ def migrate_connection_for_startup(connection, database_path, *, component):
 
     Existing databases with application tables are backed up and integrity
     checked before schema code can change them. The returned metadata is useful
-    to tests and startup logs; a current schema creates no backup.
+    to tests and startup logs; a valid current schema creates no backup.
     """
     if connection.in_transaction:
         raise RuntimeError('Startup migration requires a connection without pending writes')
@@ -46,8 +46,18 @@ def migrate_connection_for_startup(connection, database_path, *, component):
             f'(v{SCHEMA_VERSION}); refusing to modify it'
         )
     if from_version == SCHEMA_VERSION:
-        validate_schema(connection)
-        return {'from_version': from_version, 'to_version': SCHEMA_VERSION, 'backup_path': None}
+        try:
+            validate_schema(connection)
+        except RuntimeError:
+            # A database can have a current user_version while a required
+            # additive migration was skipped or only partly deployed.
+            if not schema_repair_needed(connection):
+                raise RuntimeError(
+                    f'Database schema v{from_version} is incomplete; required migrations '
+                    f'must be completed before {component} can start'
+                ) from None
+        else:
+            return {'from_version': from_version, 'to_version': SCHEMA_VERSION, 'backup_path': None}
 
     backup_path = None
     if _has_application_tables(connection):
@@ -97,8 +107,9 @@ def migrate_connection_for_startup(connection, database_path, *, component):
             rollback=True, error_type=type(error).__name__, error=str(error),
         )
         raise RuntimeError(
-            f'Schema migration from v{from_version} to v{SCHEMA_VERSION} failed; '
-            f'the SQLite transaction was rolled back.{backup_note}'
+            f'Schema migration/validation from v{from_version} to v{SCHEMA_VERSION} '
+            f'failed before {component} could start; the SQLite transaction was '
+            f'rolled back.{backup_note} Details: {error}'
         ) from error
 
     event(

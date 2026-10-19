@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -828,11 +828,45 @@ REQUIRED_TABLES = {
 }
 
 
+REQUIRED_COLUMNS = {
+    'port_inventory': {'ever_open'},
+}
+
+
+def missing_required_schema_columns(connection):
+    """Return required columns missing from otherwise versioned schemas."""
+    missing = {}
+    for table, required in REQUIRED_COLUMNS.items():
+        present = {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
+        absent = required - present
+        if absent:
+            missing[table] = absent
+    return missing
+
+
+def schema_repair_needed(connection):
+    """Whether the current schema has a known, safe additive repair available."""
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='port_inventory'"
+    ).fetchone()
+    return bool(table_exists) and (
+        'ever_open' in missing_required_schema_columns(connection).get('port_inventory', set())
+    )
+
+
 def validate_schema(connection):
     present = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     missing = REQUIRED_TABLES - present
     if missing:
         raise RuntimeError('Incomplete database schema: ' + ', '.join(sorted(missing)))
+    missing_columns = missing_required_schema_columns(connection)
+    if missing_columns:
+        details = ', '.join(
+            f'{table}.{column}'
+            for table, columns in sorted(missing_columns.items())
+            for column in sorted(columns)
+        )
+        raise RuntimeError('Incomplete database schema; required columns are missing: ' + details)
 
 def init_network_scopes(connection):
     execute_script(connection, """
@@ -917,6 +951,7 @@ def init_evidence_tables(connection):
         first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         service_observed_at TEXT, source TEXT, scan_run_id INTEGER REFERENCES scan_runs(id),
+        ever_open INTEGER NOT NULL DEFAULT 0 CHECK(ever_open IN (0,1)),
         PRIMARY KEY(network_id, device_id, protocol, port)
     );
     CREATE TABLE IF NOT EXISTS os_claims (
@@ -943,6 +978,36 @@ def init_evidence_tables(connection):
         UNIQUE(network_id, device_id, candidate_device_id, reason)
     );
     """)
+
+def migrate_port_inventory_ever_open(connection):
+    """Backfill a compact marker for ports ever observed open."""
+    import json
+
+    ensure_column(connection,'port_inventory','ever_open',
+                  'INTEGER NOT NULL DEFAULT 0 CHECK(ever_open IN (0,1))')
+    connection.execute("UPDATE port_inventory SET ever_open=1 WHERE state IN ('open','not_open')")
+    opened = set()
+    rows = connection.execute("""SELECT network_id,device_id,data_json FROM observations
+        WHERE observation_type IN ('tcp_port_scan','known_tcp_port_scan',
+                                   'service_scan','enrichment_result')""")
+    for row in rows:
+        try:
+            payload = json.loads(row['data_json'] or '{}')
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload,dict):
+            continue
+        for port in payload.get('ports') or ():
+            try:
+                number = int(port.get('port'))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if (port.get('protocol') == 'tcp' and port.get('state') == 'open'
+                    and 1 <= number <= 65535):
+                opened.add((row['network_id'],row['device_id'],'tcp',number))
+    connection.executemany("""UPDATE port_inventory SET ever_open=1
+        WHERE network_id=? AND device_id=? AND protocol=? AND port=?""",opened)
+
 
 def backfill_service_inventory(connection):
     import json
@@ -1265,6 +1330,13 @@ def initialize_database(connection):
     if version > SCHEMA_VERSION:
         raise RuntimeError("Database schema is newer than this NetChecker version")
     if version == SCHEMA_VERSION:
+        if schema_repair_needed(connection):
+            with connection:
+                connection.execute('BEGIN IMMEDIATE')
+                # Recheck after acquiring the write lock in case another process
+                # has already applied the repair.
+                if schema_repair_needed(connection):
+                    migrate_port_inventory_ever_open(connection)
         validate_schema(connection)
         return
     foreign_keys = connection.execute('PRAGMA foreign_keys').fetchone()[0]
@@ -1281,6 +1353,8 @@ def initialize_database(connection):
             if version > SCHEMA_VERSION:
                 raise RuntimeError("Database schema is newer than this NetChecker version")
             if version == SCHEMA_VERSION:
+                if schema_repair_needed(connection):
+                    migrate_port_inventory_ever_open(connection)
                 validate_schema(connection)
                 return
             if version < 1:
@@ -1584,6 +1658,8 @@ def initialize_database(connection):
                 migrate_topology_auto_link_anchors(connection)
             if version < 13:
                 ensure_column(connection, 'devices', 'display_name', 'TEXT')
+            if version < 14:
+                migrate_port_inventory_ever_open(connection)
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

@@ -555,6 +555,7 @@ def save_port_scan(
     host,
     source="nmap",
     observation_type="tcp_port_scan",
+    infer_os=True,
 ):
     """
     Speichert einen erfolgreichen TCP-Portscan.
@@ -638,8 +639,9 @@ def save_port_scan(
         )
         if device_id is not None:
             update_port_inventory(connection, network_id, scan_run_id, host, source)
-            save_os_claims(connection, network_id, scan_run_id, device_id,
-                           infer_os_claims(ports=ports))
+            if infer_os:
+                save_os_claims(connection, network_id, scan_run_id, device_id,
+                               infer_os_claims(ports=ports))
 
 
 def update_port_inventory(connection, network_id, scan_run_id, host, source):
@@ -654,11 +656,12 @@ def update_port_inventory(connection, network_id, scan_run_id, host, source):
                                 for col in columns[1:])
         connection.execute(f"""
             INSERT INTO port_inventory(network_id,device_id,protocol,port,{','.join(columns)},
-                cpe_json,metadata_json,service_observed_at,source,scan_run_id)
-            VALUES(?,?,?,?,{','.join('?' for _ in columns)},?,?,
+                ever_open,cpe_json,metadata_json,service_observed_at,source,scan_run_id)
+            VALUES(?,?,?,?,{','.join('?' for _ in columns)},?,?,?,
                    CASE WHEN ? THEN CURRENT_TIMESTAMP END,?,?)
             ON CONFLICT(network_id,device_id,protocol,port) DO UPDATE SET
-                state=excluded.state, {assignments},
+                state=excluded.state,
+                ever_open=MAX(port_inventory.ever_open,excluded.ever_open), {assignments},
                 cpe_json=CASE WHEN excluded.cpe_json != '[]' THEN excluded.cpe_json ELSE port_inventory.cpe_json END,
                 metadata_json=CASE WHEN ? THEN excluded.metadata_json ELSE port_inventory.metadata_json END,
                 service_observed_at=COALESCE(excluded.service_observed_at,port_inventory.service_observed_at),
@@ -666,10 +669,11 @@ def update_port_inventory(connection, network_id, scan_run_id, host, source):
                 source=CASE WHEN ? THEN excluded.source ELSE port_inventory.source END,
                 scan_run_id=excluded.scan_run_id
         """, (network_id,device_id,port['protocol'],port['port'],
-              *(port.get(col) for col in columns), json.dumps(port.get('cpe') or []),
+              *(port.get(col) for col in columns), int(port.get('state') == 'open'),
+              json.dumps(port.get('cpe') or []),
               json.dumps(port.get('service_metadata') or {}), service_known,source,scan_run_id,
               service_known,service_known))
-    for row in connection.execute("SELECT protocol,port FROM port_inventory WHERE network_id=? AND device_id=? AND state='open'",
+    for row in connection.execute("SELECT protocol,port FROM port_inventory WHERE network_id=? AND device_id=? AND state IN ('open','filtered')",
                                   (network_id,device_id)).fetchall():
         key = (row['protocol'], row['port'])
         if key not in seen and covered_port(host.get('scan_metadata') or {}, *key):
@@ -683,10 +687,114 @@ def get_port_inventory(connection, network_id, device_id):
     result = []
     for row in rows:
         port = dict(row)
+        port.pop('ever_open',None)
         port['cpe'] = json.loads(port.pop('cpe_json'))
         port['service_metadata'] = json.loads(port.pop('metadata_json'))
         result.append(port)
     return result
+
+
+def get_historically_open_tcp_ports(connection, network_id, device_id):
+    """Return TCP ports ever observed open, using the inventory projection."""
+    return [row['port'] for row in connection.execute("""SELECT port FROM port_inventory
+        WHERE network_id=? AND device_id=? AND protocol='tcp'
+          AND (ever_open=1 OR state='open') ORDER BY port""", (network_id,device_id))]
+
+
+def get_current_known_port_scan_observations(connection, scan_run_id):
+    return connection.execute("""SELECT device_id,data_json FROM observations
+        WHERE scan_run_id=? AND observation_type='known_tcp_port_scan'
+          AND device_id IS NOT NULL ORDER BY id""", (scan_run_id,)).fetchall()
+
+
+def _previous_port_states(connection, network_id, device_id, before_scan_run_id, requested):
+    """Find the latest definitive state per requested port across scan kinds."""
+    states = {}
+    if not requested:
+        return states
+    rows = connection.execute("""SELECT observation_type,data_json FROM observations
+        WHERE network_id=? AND device_id=? AND scan_run_id<?
+          AND observation_type IN ('tcp_port_scan','known_tcp_port_scan',
+                                   'service_scan','enrichment_result')
+        ORDER BY scan_run_id DESC,id DESC""", (network_id,device_id,before_scan_run_id))
+    for row in rows:
+        try:
+            data = json.loads(row['data_json'] or '{}')
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data,dict):
+            continue
+        metadata = data.get('scan_metadata') or {}
+        if not metadata.get('complete'):
+            continue
+        observed = {}
+        for port in data.get('ports') or ():
+            if port.get('protocol') != 'tcp':
+                continue
+            try:
+                number = int(port.get('port'))
+            except (TypeError, ValueError):
+                continue
+            if number in requested:
+                observed[number] = port
+        for number in requested - states.keys():
+            if not covered_port(metadata, 'tcp', number):
+                continue
+            port = observed.get(number)
+            state = (port or {}).get('state')
+            if state == 'open':
+                states[number] = {'state':'open','port':port,'ip':data.get('ip')}
+            elif state == 'closed' or (port is None and row['observation_type'] == 'tcp_port_scan'):
+                # Regular detail uses --open, so a complete covered omission
+                # means closed. Filtered and ambiguous states stay non-definitive.
+                states[number] = {'state':'closed','port':port,'ip':data.get('ip')}
+        if len(states) == len(requested):
+            break
+    return states
+
+
+def detect_known_port_changes(connection, network_id, scan_run_id):
+    """Record only confirmed open/closed transitions from targeted checks."""
+    rows = get_current_known_port_scan_observations(connection, scan_run_id)
+    changes = []
+    with atomic(connection):
+        connection.execute("""DELETE FROM changes WHERE scan_run_id=?
+            AND change_type IN ('PORT_OPENED','PORT_CLOSED','PORT_NOT_OPEN')""", (scan_run_id,))
+        for row in rows:
+            try:
+                current = json.loads(row['data_json'] or '{}')
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(current,dict):
+                continue
+            metadata = current.get('scan_metadata') or {}
+            if not metadata.get('complete'):
+                continue
+            current_ports = {}
+            for port in current.get('ports') or ():
+                if port.get('protocol') != 'tcp' or port.get('state') not in {'open','closed'}:
+                    continue
+                try:
+                    number = int(port.get('port'))
+                except (TypeError, ValueError):
+                    continue
+                if covered_port(metadata,'tcp',number):
+                    current_ports[number] = port
+            if not current_ports:
+                continue
+            previous = _previous_port_states(connection,network_id,row['device_id'],
+                                             scan_run_id,set(current_ports))
+            for number, port in current_ports.items():
+                old = previous.get(number)
+                if old is None or old['state'] == port['state']:
+                    continue
+                event_type = 'PORT_OPENED' if port['state'] == 'open' else 'PORT_NOT_OPEN'
+                changes.append(save_change(connection,network_id,row['device_id'],scan_run_id,
+                    event_type,
+                    old_value={'ip':old.get('ip'),'port':old.get('port') or {
+                        'protocol':'tcp','port':number,'state':old['state']}},
+                    new_value={'ip':current.get('ip'),'port':port}))
+    return changes
 
 
 def save_os_claims(connection, network_id, scan_run_id, device_id, claims):
@@ -1960,20 +2068,14 @@ def detect_detail_changes(
             )
 
 
-            # Noch kein älterer Detail-Scan:
-            # Dies ist lediglich die Baseline.
+            # The per-port baseline can come from an earlier discovery check,
+            # even when no prior detail scan exists.
             if previous is None:
-
                 baseline_devices += 1
-                continue
-
-
-            compared_devices += 1
-
-
-            previous_data = previous[
-                "data"
-            ]
+                previous_data = {}
+            else:
+                compared_devices += 1
+                previous_data = previous["data"]
 
 
             old_ip = previous_data.get(
@@ -2014,65 +2116,38 @@ def detect_detail_changes(
             # Neu geöffnete Ports
             # ==================================================
 
-            for key in sorted(
-                new_keys - old_keys
-            ):
+            prior_open_ports = set(get_historically_open_tcp_ports(
+                connection,network_id,device_id))
+            prior_open_ports.update(port for protocol,port in new_keys if protocol == 'tcp')
+            prior_states = _previous_port_states(connection,network_id,device_id,
+                scan_run_id,prior_open_ports)
+            current_metadata = current_data.get('scan_metadata') or {}
 
-                new_port = new_ports[
-                    key
-                ]
-
-
-                changes.append(
-                    save_change(
-                        connection,
-                        network_id,
-                        device_id,
-                        scan_run_id,
-                        "PORT_OPENED",
-
-                        old_value=None,
-
-                        new_value={
-                            "ip": new_ip,
-                            "port": new_port
-                        }
-                    )
-                )
+            for key, new_port in sorted(new_ports.items()):
+                if not covered_port(current_metadata,*key):
+                    continue
+                prior = prior_states.get(key[1]) if key[0] == 'tcp' else None
+                if prior is None or prior['state'] != 'closed':
+                    continue
+                changes.append(save_change(connection,network_id,device_id,scan_run_id,
+                    'PORT_OPENED',old_value={'ip':prior.get('ip'),'port':prior.get('port') or {
+                        'protocol':key[0],'port':key[1],'state':'closed'}},
+                    new_value={'ip':new_ip,'port':new_port}))
 
 
             # ==================================================
             # Nicht mehr offene Ports
             # ==================================================
 
-            for key in sorted(
-                old_keys - new_keys
-            ):
-
-                if not covered_port(current_data.get('scan_metadata') or {}, *key):
+            for number, prior in prior_states.items():
+                key = ('tcp',number)
+                if (prior['state'] != 'open' or key in new_keys
+                        or not covered_port(current_metadata,*key)):
                     continue
-
-                old_port = old_ports[
-                    key
-                ]
-
-
-                changes.append(
-                    save_change(
-                        connection,
-                        network_id,
-                        device_id,
-                        scan_run_id,
-                        "PORT_NOT_OPEN",
-
-                        old_value={
-                            "ip": old_ip,
-                            "port": old_port
-                        },
-
-                        new_value=None
-                    )
-                )
+                old_port = prior.get('port') or {'protocol':'tcp','port':number,'state':'open'}
+                changes.append(save_change(connection,network_id,device_id,scan_run_id,
+                    'PORT_NOT_OPEN',old_value={'ip':prior.get('ip') or old_ip,'port':old_port},
+                    new_value=None))
 
 
             # ==================================================

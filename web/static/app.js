@@ -469,6 +469,7 @@ async function loadNetworks(preserveSelection = false) {
 async function loadCurrentView() {
     if (activeView === "topology") return loadTopology();
     if (activeView === "timeline") return loadTimeline();
+    if (activeView === "configuration") return loadConfiguration();
     return loadDevices();
 }
 
@@ -681,7 +682,8 @@ function renderDevices() {
             device.vendor,
             device.category,
             device.subtype,
-            device.operating_system
+            device.operating_system,
+            device.port_search
         ].some(value =>
             String(value ?? "").toLowerCase().includes(search)
         );
@@ -1242,7 +1244,10 @@ document.querySelector("#close-detail")
 // Automatische Aktualisierung
 // ==========================================================
 
-setInterval(() => loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false)), REFRESH_INTERVAL_MS);
+setInterval(() => {
+    if (activeView === 'topology' && window.topologyRefreshShouldDefer?.()) return;
+    loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false));
+}, REFRESH_INTERVAL_MS);
 
 document.querySelector('#api-key').addEventListener('change', () => {
     closeDeviceDetails();

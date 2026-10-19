@@ -1,0 +1,17 @@
+<section class="panel configuration-panel">
+    <div class="panel-heading">
+        <div>
+            <h2>NetChecker konfigurieren</h2>
+            <p>Änderungen an Scannerintervallen und Nmap-Abfragen gelten ab dem nächsten Scan.</p>
+        </div>
+        <span id="configuration-status" role="status" aria-live="polite"></span>
+    </div>
+    <p class="configuration-file-note">Die Ausgangswerte stehen in <code>config/netchecker_defaults.json</code>. Persönliche Überschreibungen werden getrennt unter <code>data/netchecker_user_config.json</code> gespeichert.</p>
+    <form id="configuration-form">
+        <div id="configuration-fields"></div>
+        <div class="configuration-actions">
+            <button type="submit">Konfiguration speichern</button>
+            <button id="configuration-reset" type="button" class="button-secondary">Überschreibungen löschen und Defaults laden</button>
+        </div>
+    </form>
+</section>

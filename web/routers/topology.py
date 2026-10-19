@@ -258,6 +258,8 @@ class TopologyWaypoint(BaseModel):
     """Canvas-unit offset from the current source anchor of a manual link."""
     x: float
     y: float
+    room_axis: Literal['x', 'y'] | None = None
+    room_endpoint: Literal['source', 'target'] | None = None
 
     @validator('x', 'y', pre=True)
     def validate_coordinate(cls, value):
@@ -275,6 +277,8 @@ class TopologyLinkUpdate(BaseModel):
     label: str | None = Field(default=None, max_length=120, strict=True)
     description: str | None = Field(default=None, max_length=2000, strict=True)
     waypoints: list[TopologyWaypoint] | None = Field(default=None, max_length=128)
+    source_anchor: TopologyLinkAnchor | None = None
+    target_anchor: TopologyLinkAnchor | None = None
 
     @validator('label')
     def normalize_link_label(cls, value):
@@ -284,7 +288,15 @@ class TopologyLinkUpdate(BaseModel):
     def validate_waypoints(cls, value):
         if value is None:
             return value
-        for before, after in zip(value, value[1:]):
+        room_markers = [point for point in value if point.room_axis is not None]
+        named_endpoints = [point.room_endpoint for point in room_markers
+                           if point.room_endpoint is not None]
+        if len(room_markers) > 2 or len(named_endpoints) != len(set(named_endpoints)):
+            raise ValueError('Raumanschlüsse dürfen nur einmal je Endpunkt gespeichert werden')
+        if any(point.room_endpoint is not None and point.room_axis is None for point in value):
+            raise ValueError('Raumanschlüsse benötigen eine gültige Ausrichtungsachse')
+        route_points = [point for point in value if point.room_axis is None]
+        for before, after in zip(route_points, route_points[1:]):
             if before.x == after.x and before.y == after.y:
                 raise ValueError('Zwischenpunkte dürfen sich nicht wiederholen')
             if before.x != after.x and before.y != after.y:
@@ -1599,13 +1611,28 @@ def update_layout_link(
         ).fetchone()
         if link is None:
             raise HTTPException(404, 'Verbindung gehört nicht zum gewählten Netzwerk')
+        for point in payload.waypoints or []:
+            if point.room_axis is None:
+                continue
+            if point.room_endpoint == 'source' and link['source_room_id'] is None or \
+                    point.room_endpoint == 'target' and link['target_room_id'] is None or \
+                    point.room_endpoint is None and not (
+                        link['source_room_id'] is not None and link['target_room_id'] is not None
+                    ):
+                raise HTTPException(422, 'Die Ausrichtung muss zu einem Raum-Endpunkt passen')
+        for endpoint, anchor_field in (('source', 'source_anchor'), ('target', 'target_anchor')):
+            if changes.get(anchor_field) == 'auto' and link[f'{endpoint}_room_id'] is not None:
+                raise HTTPException(422, 'Raumverbindungen benötigen einen Anschluss an einer Raumkante')
         fields = {
             'link_type':'link_type', 'label':'label', 'description':'description',
-            'waypoints':'waypoints_json',
+            'waypoints':'waypoints_json', 'source_anchor':'source_anchor',
+            'target_anchor':'target_anchor',
         }
         assignments = ','.join(f'{column}=?' for column in (fields[key] for key in changes))
-        values = [json.dumps(value, separators=(',',':')) if key == 'waypoints' else value
-                  for key, value in changes.items()]
+        values = [json.dumps(
+            [{name:item for name,item in waypoint.items() if item is not None}
+             for waypoint in value], separators=(',',':')) if key == 'waypoints' else value
+            for key, value in changes.items()]
         db.execute(
             f'UPDATE topology_layout_links SET {assignments},updated_at=CURRENT_TIMESTAMP WHERE id=?',
             (*values,link_id),

@@ -30,6 +30,7 @@ from network import (
     get_default_route,
     get_interface_info,
 )
+from netchecker_config import nmap_profile
 
 
 # ==========================================================
@@ -529,21 +530,8 @@ def check_reachability(ip_address):
         )
 
 
-        command = [
-            "sudo",
-            "nmap",
-
-            "-sn",
-
-            # Keine DNS-Abfragen.
-            # Das macht den kurzen Check schneller.
-            "-n",
-
-            "-oX",
-            xml_path,
-
-            ip_address,
-        ]
+        profile = nmap_profile("reachability")
+        command = ["sudo", "nmap", *profile["arguments"], "-oX", xml_path, ip_address]
 
 
         try:
@@ -553,8 +541,7 @@ def check_reachability(ip_address):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=
-                    REACHABILITY_TIMEOUT_SECONDS,
+                timeout=profile["timeout_seconds"],
             )
 
         except subprocess.TimeoutExpired:
@@ -1084,45 +1071,15 @@ def scan_light(device):
         )
 
 
-        command = [
-            "sudo",
-            "nmap",
-
-            "-Pn",
-            "-n",
-
-            "-sS",
-
-            "-O",
-            "--osscan-guess",
-            "--max-os-tries",
-            "1",
-
-            "-sV",
-            "--version-light",
-
-            "-T4",
-
-            "--max-retries",
-            "1",
-
-            "--host-timeout",
-            "25s",
-
-            "-p",
-            port_specification,
-
-            "-oX",
-            xml_path,
-
-            ip_address,
-        ]
+        profile = nmap_profile("os_light")
+        command = ["sudo", "nmap", *profile["arguments"], "-p", port_specification,
+                   "-oX", xml_path, ip_address]
 
 
         return execute_nmap(
             command,
             xml_path,
-            LIGHT_PROCESS_TIMEOUT_SECONDS,
+            profile["timeout_seconds"],
         )
 
 
@@ -1170,48 +1127,15 @@ def scan_deep(device):
         )
 
 
-        command = [
-            "sudo",
-            "nmap",
-
-            "-Pn",
-            "-n",
-
-            "-sS",
-
-            "-O",
-            "--osscan-guess",
-            "--max-os-tries",
-            "2",
-
-            "-sV",
-            "--version-all",
-
-            "--script",
-            "smb-os-discovery",
-
-            "-T4",
-
-            "--max-retries",
-            "2",
-
-            "--host-timeout",
-            "120s",
-
-            "-p",
-            port_specification,
-
-            "-oX",
-            xml_path,
-
-            ip_address,
-        ]
+        profile = nmap_profile("os_deep")
+        command = ["sudo", "nmap", *profile["arguments"], "-p", port_specification,
+                   "-oX", xml_path, ip_address]
 
 
         return execute_nmap(
             command,
             xml_path,
-            DEEP_PROCESS_TIMEOUT_SECONDS,
+            profile["timeout_seconds"],
         )
 
 
@@ -1405,10 +1329,10 @@ def scan_services(device):
         return {'status':'no_ports','ports':[],'os':None}
     with tempfile.TemporaryDirectory(prefix='netchecker_services_') as directory:
         xml_path = f'{directory}/scan.xml'
-        command = ['sudo','nmap','-Pn','-n','-sS','-sV','--version-light',
-                   '-T4','--max-retries','1','--host-timeout','25s',
+        profile = nmap_profile("services")
+        command = ['sudo','nmap',*profile['arguments'],
                    '-p',','.join(str(port) for port in ports),'-oX',xml_path,device['ip']]
-        return execute_nmap(command,xml_path,LIGHT_PROCESS_TIMEOUT_SECONDS)
+        return execute_nmap(command,xml_path,profile["timeout_seconds"])
 
 
 def enrich_services(connection, network_id, scan_run_id, device):

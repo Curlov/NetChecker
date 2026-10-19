@@ -117,7 +117,19 @@ def get_devices(
                     oi.observed_at DESC,
                     oi.id DESC
                 LIMIT 1
-            ) AS operating_system
+            ) AS operating_system,
+
+            (
+                SELECT group_concat(
+                    'port ' || CAST(pi.port AS TEXT) || ' ' || pi.protocol || '/' ||
+                    CAST(pi.port AS TEXT) || ' ' || CAST(pi.port AS TEXT) || '/' || pi.protocol || ' ' ||
+                    COALESCE(pi.service,'') || ' ' || COALESCE(pi.product,'') || ' ' ||
+                    COALESCE(pi.version,'') || ' ' || COALESCE(pi.state,''),
+                    ' '
+                )
+                FROM port_inventory pi
+                WHERE pi.device_id=d.id AND pi.network_id=a.network_id
+            ) AS port_search
 
         FROM devices d
 
@@ -281,7 +293,7 @@ def get_device(
         os_claims = get_os_claims(db, network_id, device_id)
         port_history = db.execute("""SELECT source,observed_at,scan_run_id,data_json
             FROM observations WHERE network_id=? AND device_id=?
-            AND observation_type IN ('tcp_port_scan','service_scan')
+            AND observation_type IN ('tcp_port_scan','known_tcp_port_scan','service_scan')
             ORDER BY observed_at DESC,id DESC LIMIT 100""",
             (network_id,device_id)).fetchall()
         identity_candidates = db.execute("""SELECT * FROM identity_candidates

@@ -37,6 +37,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CORE_PATH = BASE_DIR / "netchecker_core.py"
 TOPOLOGY_PATH = BASE_DIR / "topology.py"
 from runtime_config import DATABASE_PATH
+from netchecker_config import timing_value
 
 # Discovery bleibt Sache des bestehenden Core-NetCheckers.
 # Die Topologie aendert sich deutlich seltener, daher genuegen 30 Minuten.
@@ -454,8 +455,8 @@ def main() -> int:
     automatic_routeros_targets = resolve_automatic_routeros_targets()
 
     core = start_core()
-    next_topology_at = time.monotonic() + INITIAL_TOPOLOGY_DELAY_SECONDS
-    next_reconcile_at = time.monotonic() + INITIAL_RECONCILE_DELAY_SECONDS
+    next_topology_at = time.monotonic() + timing_value("initial_topology_delay_seconds")
+    next_reconcile_at = time.monotonic() + timing_value("initial_reconcile_delay_seconds")
 
     try:
         while True:
@@ -476,26 +477,26 @@ def main() -> int:
                     automatic_routeros_targets,
                 ):
                     next_topology_at = (
-                        time.monotonic() + TOPOLOGY_INTERVAL_SECONDS
+                        time.monotonic() + timing_value("topology_interval_seconds")
                     )
                     # Der volle Topologielauf reconciled bereits mit.
                     next_reconcile_at = (
-                        time.monotonic() + CLASSIFICATION_RECONCILE_INTERVAL_SECONDS
+                        time.monotonic() + timing_value("classification_reconcile_interval_seconds")
                     )
                 else:
                     # Core war doch noch beschaeftigt. Nur kurz verschieben,
                     # nicht einen parallelen Lauf erzwingen.
-                    next_topology_at = now + IDLE_RECHECK_SECONDS
+                    next_topology_at = now + timing_value("idle_recheck_seconds")
 
             elif now >= next_reconcile_at:
                 if run_serial_classification_reconcile(core):
                     next_reconcile_at = (
-                        time.monotonic() + CLASSIFICATION_RECONCILE_INTERVAL_SECONDS
+                        time.monotonic() + timing_value("classification_reconcile_interval_seconds")
                     )
                 else:
-                    next_reconcile_at = now + IDLE_RECHECK_SECONDS
+                    next_reconcile_at = now + timing_value("idle_recheck_seconds")
 
-            time.sleep(SUPERVISOR_TICK_SECONDS)
+            time.sleep(timing_value("supervisor_tick_seconds"))
 
     except KeyboardInterrupt:
         print("\nNetChecker wird beendet ...")

@@ -8,10 +8,11 @@
 
     <title>NetChecker</title>
 
-    <link rel="stylesheet" href="/static/style.css?v=topology-manual-routing-2">
-    <script src="/static/app.js?v=os-evidence-priority-1" defer></script>
-    {% if view == "topology" %}<script src="/static/topology-routing.js?v=manual-segments-2" defer></script><script src="/static/topology.js?v=manual-segments-2" defer></script>{% endif %}
+    <link rel="stylesheet" href="/static/style.css?v=configuration-page-4">
+    <script src="/static/app.js?v=device-port-search-1" defer></script>
+    {% if view == "topology" %}<script src="/static/topology-routing.js?v=manual-segments-2" defer></script><script src="/static/topology.js?v=manual-segments-9" defer></script>{% endif %}
     {% if view == "timeline" %}<script src="/static/timeline.js?v=device-names-1" defer></script>{% endif %}
+    {% if view == "configuration" %}<script src="/static/configuration.js?v=configuration-page-2" defer></script>{% endif %}
 </head>
 <body data-view="{{ view }}">
 
@@ -25,6 +26,7 @@
             {% for key, label, url in [("list", "Liste", "/list"), ("topology", "Topologie", "/topology"), ("timeline", "Timeline", "/timeline")] %}
             <a href="{{ url }}" {% if view == key %}aria-current="page"{% endif %}>{{ label }}</a>
             {% endfor %}
+            <a class="nav-config-link" href="/configuration" {% if view == "configuration" %}aria-current="page"{% endif %}>Konfiguration</a>
         </nav>
         <span id="connection-status" data-state="loading">
             <span id="connection-icon" class="icon-text event-warning" aria-hidden="true">
@@ -52,9 +54,9 @@
 
 {% if view == "list" %}
         <div>
-            <label for="search">Gerät suchen</label>
+            <label for="search">Gerät oder Port suchen</label>
             <input id="search" type="search"
-                   placeholder="IP, MAC, Hersteller, Name ...">
+                   placeholder="IP, MAC, Name, Port, Dienst ...">
         </div>
 
         <div>

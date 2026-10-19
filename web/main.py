@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from web.routers import devices, networks
-from web.routers import topology, timeline
+from web.routers import topology, timeline, configuration
 from web import database as web_database
 from web.database import get_connection
 from web.access import allowed_scopes
@@ -48,6 +48,7 @@ app.include_router(devices.router)
 app.include_router(networks.router)
 app.include_router(topology.router)
 app.include_router(timeline.router)
+app.include_router(configuration.router)
 
 app.mount(
     "/static",
@@ -64,11 +65,13 @@ templates = Jinja2Templates(
 @app.get("/list", response_class=HTMLResponse)
 @app.get("/topology", response_class=HTMLResponse)
 @app.get("/timeline", response_class=HTMLResponse)
+@app.get("/configuration", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"view": {"/topology": "topology", "/timeline": "timeline"}.get(request.url.path, "list")}
+        context={"view": {"/topology": "topology", "/timeline": "timeline",
+                           "/configuration": "configuration"}.get(request.url.path, "list")}
     )
 
 

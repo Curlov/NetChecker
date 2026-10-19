@@ -1,0 +1,40 @@
+{
+  "timings": {
+    "discovery_interval_seconds": 300,
+    "detail_interval_seconds": 1800,
+    "discovery_retry_seconds": 30,
+    "main_loop_sleep_seconds": 1,
+    "topology_interval_seconds": 1800,
+    "initial_topology_delay_seconds": 120,
+    "idle_recheck_seconds": 15,
+    "supervisor_tick_seconds": 2,
+    "classification_reconcile_interval_seconds": 60,
+    "initial_reconcile_delay_seconds": 20
+  },
+  "nmap": {
+    "discovery": {
+      "arguments": ["-sn"],
+      "timeout_seconds": 90
+    },
+    "detail": {
+      "arguments": ["-Pn", "-sS", "--top-ports", "100", "-T4", "--max-retries", "1", "--host-timeout", "20s", "--open"],
+      "timeout_seconds": 35
+    },
+    "reachability": {
+      "arguments": ["-sn", "-n"],
+      "timeout_seconds": 15
+    },
+    "os_light": {
+      "arguments": ["-Pn", "-n", "-sS", "-O", "--osscan-guess", "--max-os-tries", "1", "-sV", "--version-light", "-T4", "--max-retries", "1", "--host-timeout", "25s"],
+      "timeout_seconds": 35
+    },
+    "os_deep": {
+      "arguments": ["-Pn", "-n", "-sS", "-O", "--osscan-guess", "--max-os-tries", "2", "-sV", "--version-all", "--script", "smb-os-discovery", "-T4", "--max-retries", "2", "--host-timeout", "120s"],
+      "timeout_seconds": 135
+    },
+    "services": {
+      "arguments": ["-Pn", "-n", "-sS", "-sV", "--version-light", "-T4", "--max-retries", "1", "--host-timeout", "25s"],
+      "timeout_seconds": 35
+    }
+  }
+}

@@ -1,4 +1,6 @@
 import ipaddress
+import json
+import logging
 import time
 from runtime_lock import exclusive_cycle, inventory_lock, single_scanner
 
@@ -10,9 +12,11 @@ from database import (
     abort_scan_run,
     detect_detail_changes,
     detect_discovery_changes,
+    detect_known_port_changes,
     fail_scan_run,
     finish_scan_run,
     get_connection,
+    get_historically_open_tcp_ports,
     recover_interrupted_scan_runs,
     save_discovery_host,
     save_network,
@@ -34,6 +38,7 @@ from network import (
 from output import print_device
 
 from scanner import (
+    scan_known_tcp_ports,
     scan_host_details,
     scan_network,
 )
@@ -41,7 +46,10 @@ from scanner import (
 from vendor import get_vendor_from_mac
 from local_host import enrich_local_host
 from runtime_config import DATABASE_PATH
+from netchecker_config import timing_value
 from startup_migrations import migrate_connection_for_startup
+
+logger = logging.getLogger(__name__)
 
 # ==========================================================
 # Dauerbetrieb
@@ -322,6 +330,68 @@ def run_discovery_cycle(
                 )
 
 
+        # Confirm only ports that have at some point been observed open.
+        # Discovery has already confirmed these devices are reachable. The
+        # targeted checks are serial and each device failure is isolated.
+        known_port_targets = []
+        for host in hosts:
+            device_id = host.get("device_id")
+            if device_id is None or not host.get("ip"):
+                continue
+            ports = get_historically_open_tcp_ports(connection,network_id,device_id)
+            if ports:
+                known_port_targets.append((host,ports))
+
+        port_check_started = time.monotonic()
+        port_check_failures = 0
+        for index, (host, ports) in enumerate(known_port_targets,start=1):
+            try:
+                result = scan_known_tcp_ports(host['ip'],ports)
+                metadata = (result or {}).get('scan_metadata') or {}
+                if result and metadata.get('complete'):
+                    # This probe is state-only; Nmap's service table labels
+                    # are not active service/version detection and must not
+                    # replace richer enrichment data.
+                    state_only_ports = [{key:port.get(key) for key in ('protocol','port','state')}
+                                        for port in result.get('ports') or ()]
+                    save_port_scan(connection,network_id,scan_run_id,
+                        dict(result,device_id=host['device_id'],ip=host['ip'],ports=state_only_ports),
+                        source='nmap_discovery_known_ports',
+                        observation_type='known_tcp_port_scan',infer_os=False)
+                    status = 'vollständig'
+                else:
+                    port_check_failures += 1
+                    status = 'unvollständig'
+                    connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+                        observation_type,source,data_json)
+                        VALUES(?,?,?,'known_tcp_port_scan_attempt','nmap_discovery_known_ports',?)""",
+                        (network_id,host['device_id'],scan_run_id,json.dumps({
+                            'ip':host['ip'],'status':status,'requested_ports':ports,
+                            'scan_metadata':metadata},ensure_ascii=False)))
+            except Exception as error:
+                port_check_failures += 1
+                status = 'Fehler'
+                logger.warning('Gezielte Portprüfung für %s fehlgeschlagen: %s',host['ip'],error)
+                connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+                    observation_type,source,data_json)
+                    VALUES(?,?,?,'known_tcp_port_scan_attempt','nmap_discovery_known_ports',?)""",
+                    (network_id,host['device_id'],scan_run_id,json.dumps({
+                        'ip':host['ip'],'status':status,'requested_ports':ports,
+                        'error_type':type(error).__name__},ensure_ascii=False)))
+            print(f"  Portprüfung [{index:02d}/{len(known_port_targets):02d}] "
+                  f"{host['ip']}: {len(ports)} bekannte TCP-Ports, {status}")
+
+        port_check_elapsed = time.monotonic() - port_check_started
+        if known_port_targets:
+            print(f"Gezielte Portprüfungen: {len(known_port_targets)} Geräte, "
+                  f"{port_check_failures} Fehler/unvollständig, {port_check_elapsed:.1f}s")
+            logger.info('Gezielte Portprüfungen: %s Geräte, %s Fehler/unvollständig, %.1fs',
+                        len(known_port_targets),port_check_failures,port_check_elapsed)
+        if port_check_elapsed > timing_value('discovery_interval_seconds'):
+            logger.warning('Gezielte Portprüfungen dauerten %.1fs und überschritten das Discovery-Intervall.',
+                           port_check_elapsed)
+
+
         finish_scan_run(
             connection,
             scan_run_id,
@@ -337,6 +407,8 @@ def run_discovery_cycle(
             network_id,
             scan_run_id
         )
+
+        detect_known_port_changes(connection,network_id,scan_run_id)
 
 
         change_count = count_changes_for_run(
@@ -866,13 +938,13 @@ def main():
 
         print(
             f"Discovery....: alle "
-            f"{DISCOVERY_INTERVAL_SECONDS // 60} Minuten"
+            f"{int(timing_value('discovery_interval_seconds') // 60)} Minuten"
         )
 
 
         print(
             f"Detail.......: alle "
-            f"{DETAIL_INTERVAL_SECONDS // 60} Minuten"
+            f"{int(timing_value('detail_interval_seconds') // 60)} Minuten"
         )
 
 
@@ -949,7 +1021,7 @@ def main():
 
                     next_discovery_at = (
                         time.monotonic()
-                        + DISCOVERY_INTERVAL_SECONDS
+                        + timing_value("discovery_interval_seconds")
                     )
 
 
@@ -957,7 +1029,7 @@ def main():
 
                     next_discovery_at = (
                         time.monotonic()
-                        + DISCOVERY_RETRY_SECONDS
+                        + timing_value("discovery_retry_seconds")
                     )
 
 
@@ -1016,12 +1088,12 @@ def main():
 
                 next_detail_at = (
                     time.monotonic()
-                    + DETAIL_INTERVAL_SECONDS
+                    + timing_value("detail_interval_seconds")
                 )
 
 
             time.sleep(
-                MAIN_LOOP_SLEEP_SECONDS
+                timing_value("main_loop_sleep_seconds")
             )
 
 
