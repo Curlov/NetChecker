@@ -2,15 +2,58 @@
 from pathlib import Path
 import os
 import secrets
-
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_api_key_from_dotenv():
+    """Load the API key from the project .env without overriding the process env."""
+    if os.environ.get('NETCHECKER_API_KEY'):
+        return
+
+    dotenv_path = PROJECT_DIR / '.env'
+    try:
+        lines = dotenv_path.read_text(encoding='utf-8').splitlines()
+    except FileNotFoundError:
+        return
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+
+        name, separator, value = line.partition('=')
+        if not separator or name.strip() != 'NETCHECKER_API_KEY':
+            continue
+
+        value = value.strip()
+        if value[:1] in {'"', "'"}:
+            quote = value[0]
+            closing_quote = value.find(quote, 1)
+            if closing_quote != -1:
+                trailing = value[closing_quote + 1:].strip()
+                if not trailing or trailing.startswith('#'):
+                    value = value[1:closing_quote]
+        else:
+            value = value.split(' #', 1)[0].strip()
+
+        if value:
+            os.environ['NETCHECKER_API_KEY'] = value
+        return
+
+
+_load_api_key_from_dotenv()
+
 from web.routers import devices, networks
-from web.routers import topology, timeline, configuration
+from web.routers import topology, timeline, configuration, registration
 from web import database as web_database
 from web.database import get_connection
 from web.access import allowed_scopes
@@ -49,6 +92,7 @@ app.include_router(networks.router)
 app.include_router(topology.router)
 app.include_router(timeline.router)
 app.include_router(configuration.router)
+app.include_router(registration.router)
 
 app.mount(
     "/static",

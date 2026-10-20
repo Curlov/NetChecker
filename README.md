@@ -114,12 +114,23 @@ Neue synthetische Datenbank, ohne Produktionszugriff:
 | `NETCHECKER_SERVICE_RETRY_DAYS` | Gültigkeit vollständiger Serviceprüfungen, Standard 7 Tage, mindestens 1 |
 | `NETCHECKER_LOG_FILE` | Optionales lokales JSON-Ereignislog mit Rotation; sonst stderr |
 
+Der API-Server liest `NETCHECKER_API_KEY` beim Start aus der `.env`-Datei im
+Projektverzeichnis. Beispiel:
+
+```dotenv
+NETCHECKER_API_KEY=hier-den-schluessel-eintragen
+```
+
+Ein nicht leerer Wert aus der Prozessumgebung hat Vorrang. Die `.env`-Datei ist
+von Git ausgeschlossen.
+
 Ohne API-Schlüssel ist die Oberfläche für eine vertrauenswürdige lokale Umgebung
 ausgelegt. Für Kundenzugriff Schlüssel und Bereichsbeschränkung konfigurieren
-und HTTPS vorsehen. Der Schlüssel wird im Browser nur im Eingabefeld der Sitzung
-gehalten, nicht in URLs oder persistentem Browser-Speicher. Es gibt noch keine
-Benutzerverwaltung mit individuellen Rollen; getrennte API-Installationen können
-mit unterschiedlichen Bereichen und Schlüsseln betrieben werden.
+und HTTPS vorsehen. Der Schlüssel wird im `sessionStorage` des Tabs gehalten,
+damit er Seitenwechsel übersteht; beim Schließen des Tabs wird er verworfen. Er
+erscheint nicht in URLs. Es gibt noch keine Benutzerverwaltung mit individuellen
+Rollen; getrennte API-Installationen können mit unterschiedlichen Bereichen und
+Schlüsseln betrieben werden.
 
 `network_scopes` trennt Kunden/Standorte auch bei gleichen CIDRs und MACs.
 Neue Bereiche werden bewusst nicht beim Finden unbekannter Netze automatisch

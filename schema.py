@@ -810,7 +810,7 @@ def init_topology_database(connection) -> None:
 
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 REQUIRED_TABLES = {
     'networks', 'devices', 'addresses', 'ports', 'os_information', 'scan_runs',
@@ -825,6 +825,7 @@ REQUIRED_TABLES = {
     'topology_classification_reconciliations', 'topology_layouts',
     'topology_layout_positions', 'topology_manual_nodes', 'topology_layout_links',
     'topology_rooms', 'topology_room_devices', 'topology_room_manual_nodes',
+    'timeline_events',
 }
 
 
@@ -1660,6 +1661,9 @@ def initialize_database(connection):
                 ensure_column(connection, 'devices', 'display_name', 'TEXT')
             if version < 14:
                 migrate_port_inventory_ever_open(connection)
+            if version < 15:
+                from timeline_store import migrate_timeline_events
+                migrate_timeline_events(connection)
             for migration in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute('INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)', (migration,))
             if connection.execute('PRAGMA foreign_key_check').fetchone():

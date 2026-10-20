@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitarbeiterregistrierung · NetChecker</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .registration { max-width: 560px; margin: 8vh auto; }
+        .registration form { display: grid; gap: 12px; }
+        .registration button { width: 100%; }
+        .registration-message { margin: 0; color: #86efac; }
+        .registration-message.error { color: #fca5a5; }
+    </style>
+</head>
+<body>
+<header>
+    <div>
+        <h1>NetChecker</h1>
+        <p>Mitarbeiterregistrierung</p>
+    </div>
+</header>
+<main>
+    <section class="panel registration">
+        <div class="panel-heading"><h2>Gerät zuordnen</h2></div>
+        <p>Gib deinen Namen ein. NetChecker ordnet ihn dem Gerät zu, von dem diese Seite geöffnet wurde.</p>
+        {% if message %}
+        <p class="registration-message{% if error %} error{% endif %}" role="status">{{ message }}</p>
+        {% endif %}
+        <form method="post" action="/registrieren">
+            <label for="employee-name">Name</label>
+            <input id="employee-name" name="name" type="text" maxlength="120"
+                   autocomplete="name" required value="{{ name }}">
+            <button type="submit">Registrieren</button>
+        </form>
+    </section>
+</main>
+</body>
+</html>

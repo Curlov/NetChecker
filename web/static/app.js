@@ -6,6 +6,73 @@
 // ==========================================================
 
 const activeView = document.body.dataset.view || "list";
+const API_KEY_SESSION_STORAGE_KEY = "netchecker.api-key";
+const apiKeyInput = document.querySelector("#api-key");
+const apiKeyForm = document.querySelector("#api-key-form");
+const apiKeyButton = document.querySelector("#api-key-toggle");
+let activeApiKey = "";
+
+try {
+    activeApiKey = sessionStorage.getItem(API_KEY_SESSION_STORAGE_KEY) || "";
+} catch (_) {}
+
+function updateApiKeyControl() {
+    if (apiKeyInput) {
+        apiKeyInput.value = activeApiKey;
+        apiKeyInput.disabled = Boolean(activeApiKey);
+    }
+    if (apiKeyButton) apiKeyButton.textContent = activeApiKey ? "Abmelden" : "Anmelden";
+}
+
+function setActiveApiKey(value) {
+    activeApiKey = value;
+    try {
+        if (activeApiKey)
+            sessionStorage.setItem(API_KEY_SESSION_STORAGE_KEY, activeApiKey);
+        else
+            sessionStorage.removeItem(API_KEY_SESSION_STORAGE_KEY);
+    } catch (_) {}
+    updateApiKeyControl();
+}
+
+updateApiKeyControl();
+window.getNetCheckerApiKey = () => activeApiKey;
+
+apiKeyForm?.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (activeApiKey) {
+        setActiveApiKey("");
+        window.location.reload();
+        return;
+    }
+
+    const candidate = apiKeyInput.value;
+    if (!candidate) {
+        apiKeyInput.focus();
+        return;
+    }
+
+    apiKeyButton.disabled = true;
+    try {
+        const response = await fetch("/api/health", {
+            cache: "no-store",
+            headers: {"X-Netchecker-Key": candidate}
+        });
+        let result = {};
+        try { result = await response.json(); } catch (_) {}
+        if (!response.ok)
+            throw new Error(result.detail || `HTTP ${response.status}`);
+    } catch (error) {
+        setConnectionStatus(`Anmeldung fehlgeschlagen: ${error.message}`, false);
+        apiKeyButton.disabled = false;
+        return;
+    }
+
+    setActiveApiKey(candidate);
+    apiKeyButton.disabled = false;
+    closeDeviceDetails();
+    loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false));
+});
 
 const networkSelect = document.querySelector("#network-select");
 const categorySelect = document.querySelector("#category-select");
@@ -399,11 +466,14 @@ function formatEventTime(value) {
 // API-Hilfsfunktionen
 // ==========================================================
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
+    const headers = {...(options.headers || {})};
+    const apiKey = window.getNetCheckerApiKey();
+    if (apiKey) headers["X-Netchecker-Key"] = apiKey;
     const response = await fetch(url, {
+        ...options,
         cache: "no-store",
-        headers: document.querySelector('#api-key').value
-            ? {'X-Netchecker-Key': document.querySelector('#api-key').value} : {}
+        headers
     });
 
     if (!response.ok) {
@@ -1220,7 +1290,7 @@ document.querySelector('#detail-name-form')?.addEventListener('submit', async ev
     status.textContent = 'Speichere …';
     try {
         const headers = {'Content-Type':'application/json'};
-        const apiKey = document.querySelector('#api-key').value;
+        const apiKey = window.getNetCheckerApiKey();
         if (apiKey) headers['X-Netchecker-Key'] = apiKey;
         const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/name?network_id=${encodeURIComponent(networkId)}`,
             {method:'PUT',cache:'no-store',headers,body:JSON.stringify({display_name:submittedName})});
@@ -1275,11 +1345,6 @@ setInterval(() => {
     if (activeView === 'topology' && window.topologyRefreshShouldDefer?.()) return;
     loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false));
 }, REFRESH_INTERVAL_MS);
-
-document.querySelector('#api-key').addEventListener('change', () => {
-    closeDeviceDetails();
-    loadNetworks(true).catch(error => setConnectionStatus(`API-Fehler: ${error.message}`, false));
-});
 
 // ==========================================================
 // Start

@@ -120,7 +120,7 @@ function renderNetCheckerConfiguration(data) {
 }
 
 async function configurationRequest(method, body) {
-    const apiKey = document.querySelector("#api-key")?.value || "";
+    const apiKey = window.getNetCheckerApiKey();
     const headers = {"Content-Type": "application/json"};
     if (apiKey) headers["X-Netchecker-Key"] = apiKey;
     const response = await fetch("/api/configuration", {

@@ -8,11 +8,11 @@
 
     <title>NetChecker</title>
 
-    <link rel="stylesheet" href="/static/style.css?v=timeline-category-filter-2">
-    <script src="/static/app.js?v=unassigned-device-filter-3" defer></script>
-    {% if view == "topology" %}<script src="/static/topology-routing.js?v=manual-segments-2" defer></script><script src="/static/topology.js?v=manual-segments-9" defer></script>{% endif %}
-    {% if view == "timeline" %}<script src="/static/timeline.js?v=timeline-category-filter-2" defer></script>{% endif %}
-    {% if view == "configuration" %}<script src="/static/configuration.js?v=configuration-page-3" defer></script>{% endif %}
+    <link rel="stylesheet" href="/static/style.css?v=api-key-login-1">
+    <script src="/static/app.js?v=api-key-session-3" defer></script>
+    {% if view == "topology" %}<script src="/static/topology-routing.js?v=manual-segments-2" defer></script><script src="/static/topology.js?v=api-key-session-1" defer></script>{% endif %}
+    {% if view == "timeline" %}<script src="/static/timeline.js?v=timeline-lazy-details-1" defer></script>{% endif %}
+    {% if view == "configuration" %}<script src="/static/configuration.js?v=api-key-session-1" defer></script>{% endif %}
 </head>
 <body data-view="{{ view }}">
 
@@ -41,10 +41,13 @@
 
 <main>
     <section class="toolbar">
-        <div>
+        <form id="api-key-form" class="api-key-field">
             <label for="api-key">API-Schlüssel (falls eingerichtet)</label>
-            <input id="api-key" type="password" autocomplete="off" placeholder="Nur für diese Sitzung">
-        </div>
+            <div class="api-key-controls">
+                <input id="api-key" type="password" autocomplete="off" placeholder="API-Schlüssel">
+                <button id="api-key-toggle" type="submit">Anmelden</button>
+            </div>
+        </form>
         <div>
             <label for="network-select">Netzwerk</label>
             <select id="network-select">

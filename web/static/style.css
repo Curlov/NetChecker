@@ -101,6 +101,28 @@ main {
     min-width: 190px;
 }
 
+.toolbar > .api-key-field {
+    flex: 1 1 300px;
+    min-width: 250px;
+}
+
+.api-key-controls {
+    display: flex;
+    gap: 8px;
+}
+
+.api-key-controls input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.api-key-controls button {
+    flex: 0 0 112px;
+    width: 112px;
+    min-width: 112px;
+    white-space: nowrap;
+}
+
 label {
     display: block;
     margin-bottom: 8px;

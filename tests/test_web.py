@@ -8,21 +8,22 @@ import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 
 import schema
 import database
 from web.main import app
 
 
-async def asgi_request(method, url, headers=(), body=None):
+async def asgi_request(method, url, headers=(), body=None, client=('synthetic',1)):
     parsed = urlsplit(url)
     events = []
     request_sent = False
-    request_body = json.dumps(body).encode() if body is not None else b''
+    request_body = (body if isinstance(body,bytes) else json.dumps(body).encode()) if body is not None else b''
     request_headers = list(headers)
     if body is not None:
-        request_headers.append((b'content-type', b'application/json'))
+        content_type = b'application/x-www-form-urlencoded' if isinstance(body,bytes) else b'application/json'
+        request_headers.append((b'content-type', content_type))
 
     async def receive():
         nonlocal request_sent
@@ -37,7 +38,7 @@ async def asgi_request(method, url, headers=(), body=None):
     await app({'type':'http','asgi':{'version':'3.0','spec_version':'2.4'},'http_version':'1.1',
         'method':method,'scheme':'http','path':parsed.path,'raw_path':parsed.path.encode(),
         'query_string':parsed.query.encode(),'root_path':'','headers':request_headers,
-        'server':('synthetic',8000),'client':('synthetic',1)},receive,send)
+        'server':('synthetic',8000),'client':client},receive,send)
     status = next(event['status'] for event in events if event['type']=='http.response.start')
     body = b''.join(event.get('body',b'') for event in events if event['type']=='http.response.body')
     return status, body
@@ -1676,6 +1677,55 @@ class WebTest(unittest.TestCase):
             self.assertEqual(404, self.request(f'/api/timeline?network_id={self.other_network}')[0])
         with patch.dict(os.environ, {'NETCHECKER_API_KEY':'test'}):
             self.assertEqual(401, self.request(f'/api/timeline?network_id={self.network}')[0])
+
+    def test_employee_registration_uses_source_ip_and_overwrites_manual_name(self):
+        connection = sqlite3.connect(self.path)
+        connection.execute('UPDATE devices SET display_name=? WHERE id=?', ('Alter Name', self.ids[1]))
+        connection.commit(); connection.close()
+        with patch.dict(os.environ, {'NETCHECKER_API_KEY':'server-secret'}):
+            status, body = asyncio.run(asgi_get('/registrieren'))
+            self.assertEqual(200, status)
+            self.assertIn('Mitarbeiterregistrierung', body.decode())
+            status, body = asyncio.run(asgi_request(
+                'POST', '/registrieren', body=urlencode({'name':'  Neuer Name  '}).encode(),
+                client=('192.0.2.2', 51000)))
+            self.assertEqual(401, self.request('/api/networks')[0])
+        self.assertEqual(200, status)
+        self.assertIn('Registrierung gespeichert.', body.decode())
+        connection = sqlite3.connect(self.path)
+        name = connection.execute('SELECT display_name FROM devices WHERE id=?', (self.ids[1],)).fetchone()[0]
+        connection.close()
+        self.assertEqual('Neuer Name', name)
+
+    def test_employee_registration_does_not_accept_submitted_target(self):
+        status, body = asyncio.run(asgi_request(
+            'POST', '/registrieren',
+            body=urlencode({'name':'Mein Gerät','ip':'192.0.2.10','device_id':str(self.ids[0])}).encode(),
+            client=('192.0.2.2', 51000)))
+        self.assertEqual(200, status)
+        self.assertIn('Registrierung gespeichert.', body.decode())
+        connection = sqlite3.connect(self.path)
+        names = dict(connection.execute('SELECT id,display_name FROM devices WHERE id IN (?,?)',
+                                        (self.ids[0],self.ids[1])).fetchall())
+        connection.close()
+        self.assertIsNone(names[self.ids[0]])
+        self.assertEqual('Mein Gerät', names[self.ids[1]])
+
+    def test_employee_registration_reports_unknown_or_ambiguous_ip(self):
+        status, body = asyncio.run(asgi_request(
+            'POST', '/registrieren', body=urlencode({'name':'Test'}).encode(),
+            client=('203.0.113.99', 51000)))
+        self.assertEqual(400, status)
+        self.assertIn('kein Gerät bekannt', body.decode())
+        connection = sqlite3.connect(self.path)
+        connection.execute('INSERT INTO addresses(device_id,network_id,ip) VALUES(?,?,?)',
+                           (self.ids[1],self.network,'192.0.2.10'))
+        connection.commit(); connection.close()
+        status, body = asyncio.run(asgi_request(
+            'POST', '/registrieren', body=urlencode({'name':'Test'}).encode(),
+            client=('192.0.2.10', 51000)))
+        self.assertEqual(400, status)
+        self.assertIn('mehreren Geräten', body.decode())
 
     def test_local_lucide_sprite_is_served_without_external_requests(self):
         status,body = asyncio.run(asgi_get('/static/vendor/lucide/sprite.svg'))

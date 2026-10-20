@@ -1,5 +1,6 @@
 "use strict";
 let timelineRequestId = 0;
+let timelineAbortController = null;
 let timelineDays = [];
 let timelineContext = null;
 let timelineAxis = null;
@@ -220,6 +221,7 @@ function createTimelinePortRow(deviceId, port) {
         if (details.open) timelineExpandedPorts.add(key);
         else timelineExpandedPorts.delete(key);
         updateTimelineExpandButton();
+        if (details.open) loadTimelinePortObservations(deviceId, row);
     });
     const summary = document.createElement('summary');
     summary.className = 'timeline-row timeline-port-summary';
@@ -229,8 +231,73 @@ function createTimelinePortRow(deviceId, port) {
     summary.append(label, track);
     const observations = document.createElement('div');
     observations.className = 'timeline-port-observations';
-    details.append(summary, observations);
-    return {details, label, track, observations, observationRows:new Map()};
+    const status = document.createElement('p');
+    status.className = 'timeline-service-empty';
+    status.setAttribute('role', 'status');
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.textContent = 'Weitere Beobachtungen laden';
+    more.hidden = true;
+    const row = {details, label, track, observations, status, more, key:port.key,
+        observationRows:new Map(), loaded:false, loading:false, nextOffset:0, requestId:0};
+    more.addEventListener('click', () => loadTimelinePortObservations(deviceId, row, true));
+    details.append(summary, status, observations, more);
+    return row;
+}
+async function loadTimelinePortObservations(deviceId, row, more = false) {
+    if (row.loading || (row.loaded && !more) || !row.port) return;
+    const requestId = ++row.requestId;
+    const context = timelineContext;
+    const networkId = networkSelect.value;
+    const day = timelineDay.value;
+    const offset = more ? row.nextOffset : 0;
+    row.loading = true;
+    row.more.disabled = true;
+    row.status.textContent = 'Lade Beobachtungen …';
+    const current = () => row.requestId === requestId && timelineContext === context &&
+        networkSelect.value === networkId && timelineDay.value === day &&
+        timelineDeviceRows.get(String(deviceId))?.portRows.get(row.key) === row;
+    try {
+        const url = `/api/timeline/${encodeURIComponent(deviceId)}/ports/` +
+            `${encodeURIComponent(row.port.protocol)}/${encodeURIComponent(row.port.port)}` +
+            `?network_id=${encodeURIComponent(networkId)}&day=${encodeURIComponent(day)}` +
+            `&tz=${encodeURIComponent(timelineZone)}&offset=${offset}&limit=100`;
+        const data = await fetchJson(url);
+        if (!current()) return;
+        if (offset === 0) {
+            const present = new Set(data.observations.map(item => item.id));
+            for (const [id, element] of row.observationRows) {
+                if (!present.has(id)) {
+                    element.remove();
+                    row.observationRows.delete(id);
+                }
+            }
+        }
+        for (const item of data.observations) {
+            if (row.observationRows.has(item.id)) continue;
+            const observation = createPortObservation(item);
+            row.observations.appendChild(observation);
+            row.observationRows.set(item.id, observation);
+        }
+        row.loaded = true;
+        row.nextOffset = data.next_offset;
+        row.more.hidden = !data.has_more;
+        row.more.textContent = 'Weitere Beobachtungen laden';
+        row.status.textContent = row.observationRows.size
+            ? `${row.observationRows.size} von ${row.port.observation_count} Beobachtungen`
+            : 'Keine Beobachtungen für diesen Zeitraum.';
+    } catch (error) {
+        if (!current()) return;
+        row.status.textContent = `Beobachtungen konnten nicht geladen werden: ${error.message}`;
+        row.nextOffset = offset;
+        row.more.hidden = false;
+        row.more.textContent = 'Erneut versuchen';
+    } finally {
+        if (row.requestId === requestId) {
+            row.loading = false;
+            row.more.disabled = false;
+        }
+    }
 }
 function updateTimelinePortRow(deviceId, deviceRow, port, deviceActive) {
     let row = deviceRow.portRows.get(port.key);
@@ -239,12 +306,18 @@ function updateTimelinePortRow(deviceId, deviceRow, port, deviceActive) {
         deviceRow.portRows.set(port.key, row);
         deviceRow.services.appendChild(row.details);
     }
-    const latest = port.observations.at(-1)?.port_data || {};
-    row.label.textContent = `${port.protocol.toUpperCase()} ${port.port}${latest.service ? ` – ${latest.service}` : ''}`;
+    if (row.port?.observation_revision !== port.observation_revision) {
+        ++row.requestId;
+        row.loaded = false;
+        row.loading = false;
+        row.nextOffset = 0;
+        row.more.hidden = true;
+    }
+    row.port = port;
+    row.label.textContent = `${port.protocol.toUpperCase()} ${port.port}${port.service ? ` – ${port.service}` : ''}`;
     row.portNumber = String(port.port);
     row.searchText = [port.protocol, port.port, port.status, port.label,
-        port.service, port.product, port.version,
-        ...port.observations.flatMap(item => Object.values(item.port_data || {}))]
+        port.service, port.product, port.version, port.search_text]
         .filter(value => value !== null && value !== undefined)
         .map(value => typeof value === 'object' ? JSON.stringify(value) : String(value))
         .join(' ').toLowerCase();
@@ -252,12 +325,7 @@ function updateTimelinePortRow(deviceId, deviceRow, port, deviceActive) {
         port.status === 'filtered' || port.status === 'unfiltered' ? 'filtered' :
         port.status === 'not_open' ? 'not_open' : port.closed ? 'closed' : 'open';
     updateTimelineTrack(row.track, port.intervals.map(interval => ({...interval, state})));
-    for (const item of port.observations) {
-        if (row.observationRows.has(item.id)) continue;
-        const observation = createPortObservation(item);
-        row.observations.appendChild(observation);
-        row.observationRows.set(item.id, observation);
-    }
+    if (row.details.open && deviceRow.details.open) loadTimelinePortObservations(deviceId, row);
 }
 function updateTimelineDevice(device) {
     const key = String(device.id);
@@ -325,6 +393,8 @@ function setAllTimelineDevices(open) {
 }
 async function loadTimeline() {
     const requestId = ++timelineRequestId;
+    timelineAbortController?.abort();
+    timelineAbortController = new AbortController();
     const networkId = networkSelect.value;
     if (!networkId) {
         resetTimeline();
@@ -339,7 +409,7 @@ async function loadTimeline() {
     if (!timelineContent.children.length) timelineStatus.textContent = 'Lade Verlauf …';
     try {
         const url = `/api/timeline?network_id=${encodeURIComponent(networkId)}&tz=${encodeURIComponent(timelineZone)}${timelineDay.value ? '&day=' + encodeURIComponent(timelineDay.value) : ''}`;
-        const data = await fetchJson(url);
+        const data = await fetchJson(url, {signal:timelineAbortController.signal});
         if (requestId !== timelineRequestId || networkId !== networkSelect.value) return;
         const context = `${networkId}:${data.day}`;
         if (context !== timelineContext) {
@@ -379,6 +449,7 @@ async function loadTimeline() {
         updateTimelineExpandButton();
         setConnectionStatus('API verbunden', true);
     } catch (error) {
+        if (error.name === 'AbortError') return;
         if (requestId === timelineRequestId) {
             timelineStatus.textContent = `Timeline: ${error.message}`;
             setConnectionStatus(`API-Fehler: ${error.message}`, false);

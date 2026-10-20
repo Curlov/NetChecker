@@ -340,7 +340,7 @@ async function saveTopologyLayout(networkId, layoutId, positions, manualPosition
         if (String(networkId) === topologyGraphContext)
             setTopologySaveStatus('Speichere Layout …', 'saving');
         const headers = {'Content-Type': 'application/json'};
-        const apiKey = document.querySelector('#api-key').value;
+        const apiKey = window.getNetCheckerApiKey();
         if (apiKey) headers['X-Netchecker-Key'] = apiKey;
         const response = await fetch(
             `/api/topology/layout?network_id=${encodeURIComponent(networkId)}`,
@@ -2123,7 +2123,7 @@ function topologyRenderWithAddedLink(link) {
 
 async function topologyManualRequest(path, method, payload) {
     const headers = {};
-    const apiKey = document.querySelector('#api-key').value;
+    const apiKey = window.getNetCheckerApiKey();
     if (apiKey) headers['X-Netchecker-Key'] = apiKey;
     if (payload !== undefined) headers['Content-Type'] = 'application/json';
     topologyPendingWrites++;

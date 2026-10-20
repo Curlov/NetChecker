@@ -21,6 +21,26 @@ class DeviceNameUpdate(BaseModel):
     display_name: str | None
 
 
+def normalize_device_name(value):
+    name = value.strip() if value is not None else None
+    if name and (len(name) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+        raise HTTPException(422, 'Gerätename darf höchstens 120 Zeichen und keine Steuerzeichen enthalten')
+    return name or None
+
+
+def save_device_name(db, device_id, network_id, value):
+    """Use the existing network-checked manual name field for every editor."""
+    name = normalize_device_name(value)
+    require_network(db, network_id)
+    device = db.execute('''SELECT d.id FROM devices d WHERE d.id=? AND EXISTS
+        (SELECT 1 FROM addresses a WHERE a.device_id=d.id AND a.network_id=?)''',
+        (device_id, network_id)).fetchone()
+    if device is None:
+        raise HTTPException(404, 'Gerät in diesem Netzwerk nicht gefunden')
+    db.execute('UPDATE devices SET display_name=? WHERE id=?', (name, device_id))
+    return {'device_id': device_id, 'display_name': name}
+
+
 # ==========================================================
 # Hilfsfunktionen
 # ==========================================================
@@ -209,18 +229,9 @@ def get_devices(
 @router.put('/{device_id}/name')
 def update_device_name(device_id: int, payload: DeviceNameUpdate,
                        network_id: int = Query(..., ge=1)):
-    name = payload.display_name.strip() if payload.display_name is not None else None
-    if name and (len(name) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in name)):
-        raise HTTPException(422, 'Gerätename darf höchstens 120 Zeichen und keine Steuerzeichen enthalten')
     with get_write_connection() as db:
         require_network(db, network_id)
-        device = db.execute('''SELECT d.id FROM devices d WHERE d.id=? AND EXISTS
-            (SELECT 1 FROM addresses a WHERE a.device_id=d.id AND a.network_id=?)''',
-            (device_id, network_id)).fetchone()
-        if device is None:
-            raise HTTPException(404, 'Gerät in diesem Netzwerk nicht gefunden')
-        db.execute('UPDATE devices SET display_name=? WHERE id=?', (name or None, device_id))
-    return {'device_id': device_id, 'display_name': name or None}
+        return save_device_name(db, device_id, network_id, payload.display_name)
 
 
 # ==========================================================
