@@ -25,6 +25,7 @@ const unknownCount = document.querySelector("#unknown-count");
 
 const REFRESH_INTERVAL_MS = 30000;
 const PAGE_SIZE = 1000;
+const UNASSIGNED_FILTER = "__unassigned__";
 let topologyRequestId = 0;
 let networkRequestId = 0;
 let topologyPinned = false;
@@ -575,8 +576,9 @@ function updateCategories() {
             new Option(deviceClassDesign(category).label, category)
         );
     }
+    categorySelect.add(new Option('Nicht zugeordnet', UNASSIGNED_FILTER));
 
-    if (categories.includes(previous)) {
+    if (categories.includes(previous) || previous === UNASSIGNED_FILTER) {
         categorySelect.value = previous;
     } else categorySelect.value = '';
     renderCategoryMenu(categories);
@@ -587,11 +589,15 @@ function renderCategoryMenu(categories) {
     const trigger = document.querySelector('#category-trigger');
     const options = document.querySelector('#category-options');
     const selected = categorySelect.value;
-    const selectedDesign = selected ? deviceClassDesign(selected) : {label:'Alle Gerätetypen',icon:'network'};
+    const selectedDesign = selected === UNASSIGNED_FILTER
+        ? {label:'Nicht zugeordnet',icon:'circle'}
+        : selected ? deviceClassDesign(selected) : {label:'Alle Gerätetypen',icon:'network'};
     trigger.replaceChildren(iconText(selectedDesign.label,{tone:'info',icon:selectedDesign.icon}),createLucideIcon('chevron-down'));
     options.replaceChildren();
-    for (const category of ['',...categories]) {
-        const design = category ? deviceClassDesign(category) : {label:'Alle Gerätetypen',icon:'network'};
+    for (const category of ['',...categories,UNASSIGNED_FILTER]) {
+        const design = category === UNASSIGNED_FILTER
+            ? {label:'Nicht zugeordnet',icon:'circle'}
+            : category ? deviceClassDesign(category) : {label:'Alle Gerätetypen',icon:'network'};
         const button = document.createElement('button');
         button.type = 'button';
         button.setAttribute('aria-pressed',String(category === selected));
@@ -663,16 +669,32 @@ function addTableMessage(message) {
     cell.textContent = message;
 }
 
+function compactDeviceListValue(value, maxLength = 24) {
+    const text = displayValue(value);
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
 function renderDevices() {
     const search = searchInput.value.toLowerCase().trim();
     const category = categorySelect.value;
+    const portQuery = search.match(/^port\b\s*:?\s*(\d+)$/);
+    const isExplicitPortQuery = /^port\b/.test(search);
+    const requestedPort = portQuery ? Number(portQuery[1]) : null;
 
     // IP-Sortierung erfolgt numerisch im Backend.
     const filtered = devices.filter(device => {
         if (
-            category &&
+            category && category !== UNASSIGNED_FILTER &&
             (device.category || "unknown") !== category
         ) return false;
+        if (category === UNASSIGNED_FILTER && device.topology_placed) return false;
+
+        // `port 22` searches only exact port numbers, independent of any
+        // matching digits in hostnames, addresses, services, or descriptions.
+        if (isExplicitPortQuery) {
+            if (!portQuery || requestedPort < 1 || requestedPort > 65535) return false;
+            return String(device.port_numbers || "").split(",").includes(String(requestedPort));
+        }
 
         return [
             device.ip,
@@ -713,16 +735,21 @@ function renderDevices() {
                 : `${device.confidence}%`
         ];
 
-        for (const value of values) {
-            row.insertCell().textContent = displayValue(value);
+        for (const [index, value] of values.entries()) {
+            const cell = row.insertCell();
+            const fullText = displayValue(value);
+            cell.textContent = index === 2 || index === 3
+                ? compactDeviceListValue(value) : fullText;
+            if (index === 2 || index === 3) cell.title = fullText;
         }
 
         row.cells[5].className =
             device.presence === "present"
                 ? "status-present"
                 : "status-other";
-        row.cells[3].replaceChildren(iconText(displayValue(type),
+        row.cells[3].replaceChildren(iconText(compactDeviceListValue(type),
             {tone:'info',icon:deviceClassDesign(device.category).icon}));
+        row.cells[3].title = displayValue(type);
         row.cells[5].replaceChildren(iconText(displayValue(device.presence),
             devicePresenceDesign(String(device.presence || 'unknown').toLowerCase())));
 

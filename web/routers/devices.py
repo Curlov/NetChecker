@@ -107,6 +107,21 @@ def get_devices(
 
             dp.state AS presence,
 
+            EXISTS (
+                SELECT 1 FROM topology_layouts layout
+                WHERE layout.network_id=a.network_id AND layout.is_default=1
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM topology_layout_positions position
+                        WHERE position.layout_id=layout.id AND position.device_id=d.id
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM topology_manual_nodes manual
+                        WHERE manual.layout_id=layout.id AND manual.linked_device_id=d.id
+                    )
+                  )
+            ) AS topology_placed,
+
             (
                 SELECT json_extract(oi.data_json, '$.os.name')
                 FROM observations oi
@@ -129,7 +144,15 @@ def get_devices(
                 )
                 FROM port_inventory pi
                 WHERE pi.device_id=d.id AND pi.network_id=a.network_id
-            ) AS port_search
+                  AND (pi.ever_open=1 OR pi.state='open')
+            ) AS port_search,
+
+            (
+                SELECT group_concat(DISTINCT CAST(pi.port AS TEXT))
+                FROM port_inventory pi
+                WHERE pi.device_id=d.id AND pi.network_id=a.network_id
+                  AND (pi.ever_open=1 OR pi.state='open')
+            ) AS port_numbers
 
         FROM devices d
 
@@ -283,7 +306,8 @@ def get_device(
         # Ports und Dienste
         # --------------------------------------------------
 
-        ports = get_port_inventory(db, network_id, device_id)
+        ports = [port for port in get_port_inventory(db, network_id, device_id)
+                 if port['ever_open'] or port['state'] == 'open']
 
         # --------------------------------------------------
         # Betriebssysteminformationen

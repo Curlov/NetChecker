@@ -131,6 +131,34 @@ def migrate_database_for_startup(database_path, *, component):
     create an empty inventory and appear healthy.
     """
     path = Path(database_path).expanduser().resolve()
+
+    # A current, valid schema needs no writer lock. In particular, the API
+    # must remain available while a scanner holds the inventory lock for a
+    # scan cycle; opening the database read-only is enough to verify that no
+    # startup migration is needed.
+    try:
+        readonly = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
+    except sqlite3.Error:
+        # Preserve the existing mode=rw path below so a missing or invalid
+        # database still produces the established startup error.
+        readonly = None
+    if readonly is not None:
+        try:
+            version = readonly.execute('PRAGMA user_version').fetchone()[0]
+            if version == SCHEMA_VERSION:
+                try:
+                    validate_schema(readonly)
+                except RuntimeError:
+                    pass
+                else:
+                    return {
+                        'from_version': version,
+                        'to_version': SCHEMA_VERSION,
+                        'backup_path': None,
+                    }
+        finally:
+            readonly.close()
+
     with inventory_lock(database_path=path):
         try:
             connection = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=30)

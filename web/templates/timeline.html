@@ -1,10 +1,24 @@
 <section class="panel" id="timeline-panel">
     <div class="panel-heading"><h2>Timeline</h2><span id="timeline-status" role="status"></span></div>
-    <p>Grüne Balken zeigen aus Scans abgeleitete Online-Zeiträume. Port- und Serviceinformationen stammen aus gespeicherten Beobachtungen; Zeiten in der lokalen Browser-Zeitzone.</p>
-    <div class="toolbar">
+    <p>Grüne Balken zeigen erreichbare Geräte, rote Balken Geräte, die nicht mehr aktiv sind. Blaue Balken zeigen offene Ports, gelbe Balken geschlossene Ports oder Ports nicht mehr aktiver Geräte. Die Farbe zeigt jeweils den zuletzt gespeicherten Status des dargestellten Zeitraums; es werden keine zusätzlichen Zeitabschnitte ergänzt. Zeiten in der lokalen Browser-Zeitzone.</p>
+    <div class="toolbar timeline-toolbar">
         <button id="timeline-prev" type="button" disabled>Vorheriger Tag</button>
         <div><label for="timeline-day">Kalendertag</label><input id="timeline-day" type="date"></div>
         <button id="timeline-next" type="button" disabled>Nächster Tag</button>
+        <div class="timeline-category-filter">
+            <label id="timeline-category-label" for="timeline-category-select">Gerätetyp</label>
+            <select id="timeline-category-select" hidden aria-hidden="true" tabindex="-1">
+                <option value="">Alle Gerätetypen</option>
+            </select>
+            <details id="timeline-category-menu" class="category-menu">
+                <summary id="timeline-category-trigger" aria-labelledby="timeline-category-label timeline-category-trigger">Alle Gerätetypen</summary>
+                <div id="timeline-category-options" class="category-options" role="group" aria-label="Gerätetyp oder Topologiezuordnung auswählen"></div>
+            </details>
+        </div>
+        <div class="timeline-search"><label for="timeline-search">Timeline durchsuchen</label>
+            <input id="timeline-search" type="search" placeholder="Gerät, Dienst … · Port 22">
+        </div>
+        <button id="timeline-expand-all" type="button" disabled>Alle ausklappen</button>
     </div>
     <div id="timeline-content"></div>
 </section>

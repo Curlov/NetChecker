@@ -141,8 +141,10 @@ async function loadConfiguration() {
         const configuration = await configurationRequest("GET");
         if (!configurationHasUnsavedChanges || !currentNetCheckerConfiguration)
             renderNetCheckerConfiguration(configuration);
+        setConnectionStatus("Konfiguration verfügbar", true);
     } catch (error) {
         configStatus.textContent = `Konfiguration konnte nicht geladen werden: ${error.message}`;
+        setConnectionStatus("Konfiguration nicht verfügbar", false);
     }
 }
 
@@ -174,8 +176,10 @@ configForm.addEventListener("submit", async event => {
         configurationHasUnsavedChanges = false;
         renderNetCheckerConfiguration(saved);
         configStatus.textContent = "Gespeichert. Scanner verwenden die Werte beim nächsten Lauf.";
+        setConnectionStatus("Konfiguration gespeichert", true);
     } catch (error) {
         configStatus.textContent = `Speichern fehlgeschlagen: ${error.message}`;
+        setConnectionStatus("Speichern fehlgeschlagen", false);
     }
 });
 
@@ -186,8 +190,10 @@ document.querySelector("#configuration-reset").addEventListener("click", async (
         configurationHasUnsavedChanges = false;
         renderNetCheckerConfiguration(reset);
         configStatus.textContent = "Überschreibungen gelöscht. Die Defaults sind aktiv.";
+        setConnectionStatus("Defaults aktiv", true);
     } catch (error) {
         configStatus.textContent = `Zurücksetzen fehlgeschlagen: ${error.message}`;
+        setConnectionStatus("Zurücksetzen fehlgeschlagen", false);
     }
 });
 

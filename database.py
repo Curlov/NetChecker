@@ -687,7 +687,6 @@ def get_port_inventory(connection, network_id, device_id):
     result = []
     for row in rows:
         port = dict(row)
-        port.pop('ever_open',None)
         port['cpe'] = json.loads(port.pop('cpe_json'))
         port['service_metadata'] = json.loads(port.pop('metadata_json'))
         result.append(port)
