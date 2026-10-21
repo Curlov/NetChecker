@@ -8,10 +8,10 @@
 
     <title>NetChecker</title>
 
-    <link rel="stylesheet" href="/static/style.css?v=api-key-login-1">
-    <script src="/static/app.js?v=api-key-session-3" defer></script>
+    <link rel="stylesheet" href="/static/style.css?v=aligned-inventory-rows-1">
+    <script src="/static/app.js?v=device-timeline-links-5" defer></script>
     {% if view == "topology" %}<script src="/static/topology-routing.js?v=manual-segments-2" defer></script><script src="/static/topology.js?v=api-key-session-1" defer></script>{% endif %}
-    {% if view == "timeline" %}<script src="/static/timeline.js?v=timeline-lazy-details-1" defer></script>{% endif %}
+    {% if view == "timeline" %}<script src="/static/timeline.js?v=timeline-device-links-2" defer></script>{% endif %}
     {% if view == "configuration" %}<script src="/static/configuration.js?v=api-key-session-1" defer></script>{% endif %}
 </head>
 <body data-view="{{ view }}">
@@ -48,7 +48,7 @@
                 <button id="api-key-toggle" type="submit">Anmelden</button>
             </div>
         </form>
-        <div>
+        <div class="network-field">
             <label for="network-select">Netzwerk</label>
             <select id="network-select">
                 <option value="">Netzwerk auswählen</option>
@@ -56,27 +56,32 @@
         </div>
 
 {% if view == "list" %}
-        <div>
-            <label for="search">Gerät oder Port suchen</label>
-            <input id="search" type="search"
-                   placeholder="IP, MAC, Name, Dienst … · Port 22">
-        </div>
+        <div class="list-toolbar-filters">
+            <div>
+                <label for="search">Gerät oder Port suchen</label>
+                <input id="search" type="search"
+                       placeholder="IP, MAC, Name, Dienst … · Port 22">
+            </div>
 
-        <div>
-            <label id="category-label" for="category-select">Gerätetyp</label>
-            <select id="category-select" hidden aria-hidden="true" tabindex="-1">
-                <option value="">Alle Gerätetypen</option>
-            </select>
-            <details id="category-menu" class="category-menu">
-                <summary id="category-trigger" aria-labelledby="category-label category-trigger">Alle Gerätetypen</summary>
-                <div id="category-options" class="category-options" role="group" aria-label="Gerätetyp oder Topologiezuordnung auswählen"></div>
-            </details>
+            <div>
+                <label id="category-label" for="category-select">Gerätetyp</label>
+                <select id="category-select" hidden aria-hidden="true" tabindex="-1">
+                    <option value="">Alle Gerätetypen</option>
+                </select>
+                <details id="category-menu" class="category-menu">
+                    <summary id="category-trigger" aria-labelledby="category-label category-trigger">Alle Gerätetypen</summary>
+                    <div id="category-options" class="category-options" role="group" aria-label="Gerätetyp oder Topologiezuordnung auswählen"></div>
+                </details>
+            </div>
+            <button id="refresh-button" type="button">
+                Aktualisieren
+            </button>
         </div>
-
-{% endif %}
+{% else %}
         <button id="refresh-button" type="button">
             Aktualisieren
         </button>
+{% endif %}
     </section>
 
     {% include view + ".html" %}

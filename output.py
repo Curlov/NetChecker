@@ -129,6 +129,9 @@ def get_category_label(category):
         "single_board_computer":
             "Single-Board-Computer",
 
+        "smart_tv":
+            "Smart-TV",
+
         "unknown":
             "Unbekannt",
     }
@@ -294,6 +297,14 @@ def print_device(
         f"Hostname....: "
         f"{display_value(device.get('hostname'))}"
     )
+
+    identification = device.get('device_identification') or {}
+    if identification.get('status') == 'confirmed':
+        print(f"Gerätetyp...: {display_value(identification.get('type'))}")
+        print(f"Gerätename..: {display_value(identification.get('name'))}")
+        print(f"Modell......: {display_value(identification.get('model'))}")
+        print(f"Betriebssystem: {display_value(identification.get('operating_system'))}")
+        print(f"Erkennung...: Bestätigt ({display_value(identification.get('source'))})")
 
 
     print(

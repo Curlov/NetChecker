@@ -76,7 +76,9 @@ async function checkFrontend(source) {
             data = {device, addresses:[{ip:device.ip}],ports:[],os_information:[],
                 mac_analysis:{valid:true,unicast:true,locally_administered:false,hypotheses:[]},
                 os_summary:{family:{value:'Linux',status:'suspected',source:'synthetic'}},
-                os_claims:[],identity_candidates:[],interfaces:[],port_history:[],classification_history:[],changes:[],topology_hints:[]};
+                os_claims:[],identity_candidates:[],interfaces:[],port_history:[],classification_history:[],changes:[],topology_hints:[],
+                classification:{category:'apple_device',subtype:'iPhone / iPad / iOS-Gerät',confidence:70,score:60,
+                    evidence_json:JSON.stringify([{reason:'TCP-Port 62078 ist offen; Apple-Mobilgerät möglich'}])}};
         } else if (String(url).startsWith('/api/devices?')) {
             data = {total:1,count:1,devices:[device]};
         } else if (String(url).startsWith('/api/topology?') && topologyResponse) {
@@ -117,6 +119,10 @@ async function checkFrontend(source) {
     assert(document.querySelector('#search').value==='synthetic','Search filter lost');
     assert(document.querySelector('#detail-mac').children.length > 0,'MAC facts missing');
     assert(document.querySelector('#detail-os-summary').children.length > 0,'OS summary missing');
+    const classificationReason = document.querySelector('#detail-classification').children.find(line =>
+        line.children[0]?.textContent === 'Erkennungsgrund');
+    assert(classificationReason?.children[1]?.textContent.includes('TCP-Port 62078'),
+        'Classification evidence reason was not shown');
     api.closeDeviceDetails();
     assert(api.selected()===null && document.querySelector('#detail-panel').hidden,'Close did not reset selection');
 

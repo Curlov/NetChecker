@@ -29,6 +29,8 @@ Migrationen. Wiederholte Initialisierung einer aktuellen Datenbank schreibt nich
 `observations` bewahrt Rohbeobachtungen, `port_inventory` die netzwerkbezogene
 Projektion. Die ältere Tabelle `ports` bleibt als Kompatibilitätstabelle erhalten.
 `os_claims` trennt Familie, Kernel, Distribution und Distributionsversion.
+Die lokale Gerätefingerprint-Erkennung und ihre Quellen sind in
+[`FINGERPRINTS.md`](FINGERPRINTS.md) beschrieben.
 Servicebanner sind Hinweise; lokal ausgelesene OS-Release-Daten sind bestätigt.
 Ein Banner kann zu einem Container oder Dienst gehören und beweist deshalb
 nicht zwingend das Betriebssystem des gesamten Rechners.

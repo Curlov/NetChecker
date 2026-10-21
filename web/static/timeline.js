@@ -21,6 +21,9 @@ const timelineContent = document.querySelector('#timeline-content');
 const timelineStatus = document.querySelector('#timeline-status');
 const timelineZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const TIMELINE_UNASSIGNED_FILTER = '__unassigned__';
+const timelineDeviceParam = new URLSearchParams(location.search).get('device_id');
+let timelineRequestedDeviceId = /^[1-9]\d*$/.test(timelineDeviceParam || '') ? timelineDeviceParam : null;
+let timelineDeviceNavigationPending = Boolean(timelineRequestedDeviceId);
 
 function renderTimelineCategoryMenu(devices) {
     const previous = timelineCategorySelect.value;
@@ -136,8 +139,14 @@ function createTimelineDeviceRow(device) {
     chevron.textContent = '›';
     const label = document.createElement('span');
     label.className = 'timeline-device-name';
+    const listLink = document.createElement('a');
+    listLink.className = 'timeline-list-link';
+    listLink.textContent = '↗';
+    listLink.title = 'In Listenansicht öffnen';
+    listLink.setAttribute('aria-label', 'Gerät in Listenansicht öffnen');
+    listLink.addEventListener('click', event => event.stopPropagation());
     const track = makeTimelineTrack();
-    labelBox.append(chevron, label);
+    labelBox.append(chevron, listLink, label);
     summary.append(labelBox, track);
     const empty = document.createElement('p');
     empty.className = 'timeline-service-empty';
@@ -145,7 +154,7 @@ function createTimelineDeviceRow(device) {
     const services = document.createElement('div');
     services.className = 'timeline-service-list';
     details.append(summary, empty, services);
-    const row = {details, label, track, empty, services, portRows:new Map()};
+    const row = {details, label, listLink, track, empty, services, portRows:new Map()};
     timelineDeviceRows.set(String(device.id), row);
     timelineContent.appendChild(details);
     return row;
@@ -321,24 +330,32 @@ function updateTimelinePortRow(deviceId, deviceRow, port, deviceActive) {
         .filter(value => value !== null && value !== undefined)
         .map(value => typeof value === 'object' ? JSON.stringify(value) : String(value))
         .join(' ').toLowerCase();
+    const currentStatus = port.current_status ?? port.status;
     const state = deviceActive === false ? 'unreachable' :
-        port.status === 'filtered' || port.status === 'unfiltered' ? 'filtered' :
-        port.status === 'not_open' ? 'not_open' : port.closed ? 'closed' : 'open';
+        currentStatus === 'filtered' || currentStatus === 'unfiltered' ? 'filtered' :
+        currentStatus === 'not_open' ? 'not_open' :
+        currentStatus === 'closed' ? 'closed' : 'open';
     updateTimelineTrack(row.track, port.intervals.map(interval => ({...interval, state})));
     if (row.details.open && deviceRow.details.open) loadTimelinePortObservations(deviceId, row);
 }
 function updateTimelineDevice(device) {
     const key = String(device.id);
     const row = timelineDeviceRows.get(key) || createTimelineDeviceRow(device);
+    const listUrl = new URL('/list', location.origin);
+    listUrl.searchParams.set('network_id', String(networkSelect.value));
+    listUrl.searchParams.set('device_id', key);
+    row.listLink.href = `${listUrl.pathname}${listUrl.search}`;
+    row.listLink.setAttribute('aria-label', `Gerät ${device.ip || `#${device.id}`} in Listenansicht öffnen`);
     row.label.textContent = [device.ip, device.display_name || device.hostname].filter(Boolean).join(' · ') || `Gerät #${device.id}`;
     row.searchText = [device.ip, device.display_name, device.hostname, device.mac]
         .filter(Boolean).join(' ').toLowerCase();
     row.category = device.category || 'unknown';
     row.topologyPlaced = Boolean(device.topology_placed);
+    const currentActive = device.current_active ?? device.active;
     updateTimelineTrack(row.track, device.intervals.map(interval => ({
-        ...interval, state:device.active === false ? 'inactive' : 'online',
+        ...interval, state:currentActive === false ? 'inactive' : 'online',
     })));
-    for (const port of device.ports) updateTimelinePortRow(key, row, port, device.active);
+    for (const port of device.ports) updateTimelinePortRow(key, row, port, currentActive);
     row.empty.hidden = row.portRows.size > 0;
 }
 function updateTimelineExpandButton() {
@@ -355,8 +372,11 @@ function applyTimelineSearch() {
     let visibleDevices = 0;
 
     for (const row of timelineDeviceRows.values()) {
-        const categoryMatches = !selectedCategory || (selectedCategory === TIMELINE_UNASSIGNED_FILTER
-            ? !row.topologyPlaced : row.category === selectedCategory);
+        const targetMatches = !timelineRequestedDeviceId ||
+            row.details.dataset.deviceId === timelineRequestedDeviceId;
+        const categoryMatches = targetMatches && (!selectedCategory ||
+            (selectedCategory === TIMELINE_UNASSIGNED_FILTER
+                ? !row.topologyPlaced : row.category === selectedCategory));
         const deviceMatches = categoryMatches && (!query || (!isPortQuery && row.searchText.includes(query)));
         let matchingPorts = 0;
         for (const portRow of row.portRows.values()) {
@@ -439,6 +459,20 @@ async function loadTimeline() {
             timelineEmptyMessage = null;
         }
         for (const device of data.devices) updateTimelineDevice(device);
+        let targetRowToScroll = null;
+        if (timelineRequestedDeviceId) {
+            const targetRow = timelineDeviceRows.get(timelineRequestedDeviceId);
+            if (targetRow) {
+                if (timelineDeviceNavigationPending) {
+                    targetRow.details.open = true;
+                    targetRowToScroll = targetRow;
+                }
+                timelineDeviceNavigationPending = false;
+            } else {
+                timelineRequestedDeviceId = null;
+                timelineDeviceNavigationPending = false;
+            }
+        }
         renderTimelineCategoryMenu(data.devices);
         const presentDeviceIds = new Set(data.devices.map(device => String(device.id)));
         timelineExpandedDevices = new Set([...timelineExpandedDevices].filter(id => presentDeviceIds.has(id)));
@@ -446,6 +480,7 @@ async function loadTimeline() {
             device.ports.map(port => `${device.id}:${port.key}`)));
         timelineExpandedPorts = new Set([...timelineExpandedPorts].filter(key => presentPortIds.has(key)));
         applyTimelineSearch();
+        targetRowToScroll?.details.scrollIntoView({block:'center'});
         updateTimelineExpandButton();
         setConnectionStatus('API verbunden', true);
     } catch (error) {
@@ -481,7 +516,11 @@ timelineExpandAll.addEventListener('click', () => {
     const devices = [...timelineDeviceRows.values()].map(row => row.details);
     setAllTimelineDevices(!(devices.length > 0 && devices.every(item => item.open)));
 });
-networkSelect.addEventListener('change', () => {timelineDay.value = ''; loadTimeline();});
+networkSelect.addEventListener('change', () => {
+    timelineDay.value = '';
+    timelineDeviceNavigationPending = Boolean(timelineRequestedDeviceId);
+    loadTimeline();
+});
 for (const [id, direction] of [['timeline-prev', -1], ['timeline-next', 1]]) {
     document.getElementById(id).addEventListener('click', () => {
         const candidates = timelineDays.filter(day => direction < 0 ? day < timelineDay.value : day > timelineDay.value);

@@ -57,23 +57,26 @@ def daily(network_id: int = Query(..., ge=1), day: date | None = None,
         # Repeated "still online/open" samples belong in the details, not in
         # interval reconstruction. Keep transitions, metadata updates and the
         # last sample; a missing device resets even an unchanged open port.
-        device_events = db.execute("""SELECT * FROM (
-            SELECT e.*,lag(kind) OVER (
+        device_events = db.execute("""WITH ranked AS (
+            SELECT e.rowid AS event_rowid,e.kind,lag(kind) OVER (
                 PARTITION BY device_id ORDER BY at,CASE kind WHEN 2 THEN 0 ELSE 1 END,source_id
             ) AS previous_kind
             FROM timeline_events e WHERE network_id=? AND at>=julianday(?)
                 AND at<julianday(?) AND at<=julianday(?) AND kind IN (1,2)
-        ) WHERE kind=2 OR previous_kind IS NULL OR kind!=previous_kind""", bounds).fetchall()
+        ) SELECT e.* FROM ranked r JOIN timeline_events e ON e.rowid=r.event_rowid
+            WHERE r.kind=2 OR r.previous_kind IS NULL OR r.kind!=r.previous_kind""", bounds).fetchall()
         port_events = db.execute("""WITH ranked AS (
-            SELECT e.*,lag(state) OVER w AS previous_state,lag(at) OVER w AS previous_at
+            SELECT e.rowid AS event_rowid,e.network_id,e.device_id,e.at,e.state,
+                lag(state) OVER w AS previous_state,lag(at) OVER w AS previous_at
             FROM timeline_events e WHERE network_id=? AND at>=julianday(?)
                 AND at<julianday(?) AND at<=julianday(?) AND kind IN (3,4)
             WINDOW w AS (
                 PARTITION BY device_id,protocol,port ORDER BY at,kind,source_id,port_index)
-        ) SELECT * FROM ranked e WHERE previous_at IS NULL OR state IS NOT previous_state
-            OR (state='open' AND EXISTS (SELECT 1 FROM timeline_events m
-                WHERE m.network_id=e.network_id AND m.device_id=e.device_id AND m.kind=2
-                  AND m.at>e.previous_at AND m.at<=e.at))""", bounds).fetchall()
+        ) SELECT e.* FROM ranked r JOIN timeline_events e ON e.rowid=r.event_rowid
+            WHERE r.previous_at IS NULL OR r.state IS NOT r.previous_state
+            OR (r.state='open' AND EXISTS (SELECT 1 FROM timeline_events m
+                WHERE m.network_id=r.network_id AND m.device_id=r.device_id AND m.kind=2
+                  AND m.at>r.previous_at AND m.at<=r.at))""", bounds).fetchall()
         # Counts/search include every sample, while only the latest sample and
         # actual transitions are returned to Python for interval reconstruction.
         metadata = ','.join(f"""(SELECT v.{field} FROM timeline_events v
@@ -128,6 +131,9 @@ def daily(network_id: int = Query(..., ge=1), day: date | None = None,
             FROM port_inventory WHERE network_id=? AND (ever_open=1 OR state='open')
             ORDER BY device_id,protocol,port""", (network_id,)):
             inventory_ports.setdefault(row['device_id'], []).append(dict(row))
+        current_presence = {row['device_id']: row['state'] == 'present'
+                            for row in db.execute("""SELECT device_id,state FROM device_presence
+                                WHERE network_id=?""", (network_id,))}
         identities = {r['id']: dict(r) for r in db.execute("""SELECT d.id,d.hostname,d.display_name,d.mac,
             dc.category,
             EXISTS (
@@ -264,13 +270,15 @@ def daily(network_id: int = Query(..., ge=1), day: date | None = None,
                                    (port['key'], port['service'], port['product'], port['version']) if value),
                 'service': port['service'], 'product': port['product'], 'version': port['version'],
                 'intervals': port['intervals'], 'status': port['last_state'],
+                'current_status': port['inventory_state'],
                 'closed': port['last_state'] in {'closed', 'not_open'}, 'observations': [],
                 'observation_count': count,
                 'observation_revision': f'{count}:{event_id(latest)}' if latest is not None else '0',
                 'search_text': ' '.join(sorted(port['search'])),
             })
         result.append({**identities.get(device_id, {'id': device_id}), 'intervals': online,
-                       'active': device_active, 'ports': day_ports, 'services': day_ports})
+                       'active': device_active, 'current_active': current_presence.get(device_id),
+                       'ports': day_ports, 'services': day_ports})
 
     def device_ip_order(device):
         try:

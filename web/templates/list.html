@@ -50,9 +50,11 @@
             <h2 id="detail-title">Gerätedetails</h2>
             <span id="detail-subtitle"></span>
         </div>
-        <button id="close-detail" type="button">
-            Schließen
-        </button>
+        <div class="detail-panel-actions">
+            <a id="detail-timeline-link" class="device-view-link" href="#" title="In Timeline öffnen"
+               aria-label="Dieses Gerät in Timeline öffnen">↗</a>
+            <button id="close-detail" type="button">Schließen</button>
+        </div>
     </div>
 
     <div class="detail-grid">
@@ -65,6 +67,10 @@
                 <button type="submit">Speichern</button></div>
                 <span id="detail-name-status" role="status" aria-live="polite"></span>
             </form>
+            <details id="detail-advanced" class="detail-older" hidden>
+                <summary>Erweiterte Geräteerkennung</summary>
+                <div id="detail-advanced-content"></div>
+            </details>
         </article>
 
         <article class="detail-card">

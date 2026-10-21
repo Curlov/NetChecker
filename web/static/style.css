@@ -1,5 +1,6 @@
 :root {
     --header-cyan: #38bdf8;
+    --inventory-row-height: 34px;
     font-family: Arial, sans-serif;
     color: #e5e7eb;
     background: #0f172a;
@@ -106,6 +107,29 @@ main {
     min-width: 250px;
 }
 
+body[data-view="list"] .toolbar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+}
+body[data-view="list"] .toolbar > .api-key-field,
+body[data-view="list"] .toolbar > .network-field { min-width:0; }
+.list-toolbar-filters {
+    display:grid;
+    grid-template-columns:minmax(0, 1.4fr) minmax(0, 1fr) auto;
+    align-items:end;
+    gap:16px;
+}
+.list-toolbar-filters > div { min-width:0; }
+@media (max-width:1050px) {
+    body[data-view="list"] .toolbar { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    .list-toolbar-filters { grid-column:1 / -1; }
+}
+@media (max-width:700px) {
+    body[data-view="list"] .toolbar { grid-template-columns:minmax(0, 1fr); }
+    .list-toolbar-filters { grid-template-columns:minmax(0, 1fr); }
+}
+
 .api-key-controls {
     display: flex;
     gap: 8px;
@@ -185,6 +209,8 @@ button:hover {
     gap: 12px;
     margin-bottom: 16px;
 }
+.detail-panel-actions { display:flex; align-items:stretch; gap:8px; flex:0 0 auto; }
+.detail-panel-actions > .device-view-link { width:42px; height:auto; flex-basis:42px; font-size:20px; }
 
 .panel-heading h2 {
     margin: 0;
@@ -208,18 +234,38 @@ table {
     text-align: left;
 }
 
-#device-list-table { table-layout:fixed; }
+#device-list-table { table-layout:fixed; min-width:1200px; }
 #device-list-table th, #device-list-table td {
     white-space:normal;
     overflow-wrap:anywhere;
 }
 #device-list-table th:nth-child(1), #device-list-table td:nth-child(1) { width:14%; }
-#device-list-table th:nth-child(2), #device-list-table td:nth-child(2) { width:17%; }
-#device-list-table th:nth-child(3), #device-list-table td:nth-child(3) { width:21%; }
-#device-list-table th:nth-child(4), #device-list-table td:nth-child(4) { width:18%; }
-#device-list-table th:nth-child(5), #device-list-table td:nth-child(5) { width:16%; }
-#device-list-table th:nth-child(6), #device-list-table td:nth-child(6) { width:9%; }
-#device-list-table th:nth-child(7), #device-list-table td:nth-child(7) { width:5%; }
+#device-list-table th:nth-child(2), #device-list-table td:nth-child(2) { width:15%; }
+#device-list-table th:nth-child(3), #device-list-table td:nth-child(3) { width:20%; }
+#device-list-table th:nth-child(4), #device-list-table td:nth-child(4) { width:16%; }
+#device-list-table th:nth-child(5), #device-list-table td:nth-child(5) { width:14%; padding-right:6px; }
+#device-list-table th:nth-child(6), #device-list-table td:nth-child(6) { width:13%; padding-left:6px; padding-right:6px; white-space:nowrap; overflow-wrap:normal; }
+#device-list-table th:nth-child(7), #device-list-table td:nth-child(7) { width:8%; padding-left:6px; padding-right:6px; }
+#device-list-table th:nth-child(7) { white-space:nowrap; overflow-wrap:normal; }
+#device-table tr[data-device-id] td {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#device-table tr[data-device-id], .timeline-row {
+    font-size: 16px;
+    line-height: 20px;
+}
+#device-table tr[data-device-id] { height: var(--inventory-row-height); }
+#device-table td:nth-child(4) .icon-text { max-width:100%; min-width:0; }
+#device-table td:nth-child(4) .icon-text > span {
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
 
 th, td {
     padding: 13px;
@@ -241,6 +287,9 @@ tbody tr:hover {
 tbody tr[data-device-id] {
     cursor: pointer;
 }
+.device-view-link, .timeline-list-link { display:inline-flex; flex:0 0 18px; width:18px; height:18px; align-items:center; justify-content:center; border:1px solid #475569; border-radius:4px; color:#7dd3fc; background:#1e293b; font-size:13px; line-height:1; text-decoration:none; vertical-align:middle; }
+.device-view-link:hover, .timeline-list-link:hover { border-color:#38bdf8; background:#0c4a6e; color:#e0f2fe; }
+.device-view-link:focus-visible, .timeline-list-link:focus-visible { outline:2px solid #38bdf8; outline-offset:2px; }
 
 /* Auswahl bleibt beim Mouseout und nach dem Neuaufbau der Tabelle sichtbar. */
 #device-table tr.device-selected,
@@ -490,9 +539,14 @@ header nav .nav-config-link::before { content:"|"; position:absolute; left:0; co
 .timeline-axis, .timeline-row { display:grid; grid-template-columns:minmax(220px, var(--timeline-label-width)) minmax(0, 1fr); column-gap:16px; align-items:center; }
 .timeline-axis { margin:8px 0 4px; color:#94a3b8; font-size:12px; }
 .timeline-axis-track { display:flex; justify-content:space-between; }
-.timeline-device { border-top:1px solid #334155; padding:5px 0; }
+.timeline-device { border-top:1px solid #334155; }
 .timeline-device > summary, .timeline-port > summary { cursor:pointer; list-style:none; }
+.timeline-device > summary { min-height:calc(var(--inventory-row-height) - 1px); padding:0; }
 .timeline-device > summary::-webkit-details-marker, .timeline-port > summary::-webkit-details-marker { display:none; }
+.timeline-device > summary:hover, .timeline-port > summary:hover { background:#334155; }
+.timeline-device > summary:hover .timeline-track, .timeline-port > summary:hover .timeline-track {
+    background:repeating-linear-gradient(to right,#334155 0, #334155 calc(25% - 1px),#475569 calc(25% - 1px),#475569 25%);
+}
 .timeline-device-label { display:flex; align-items:center; gap:8px; min-width:0; }
 .timeline-device-name, .timeline-port-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .timeline-chevron { width:12px; flex:0 0 12px; color:#94a3b8; font-size:20px; line-height:1; transform:rotate(0deg); transition:transform .12s ease; }
@@ -504,7 +558,7 @@ header nav .nav-config-link::before { content:"|"; position:absolute; left:0; co
 .timeline-service-empty { margin:5px 0 5px 24px; color:#94a3b8; font-size:13px; }
 .timeline-service-list { margin:2px 0 0; }
 .timeline-port { margin:0; }
-.timeline-port-summary { min-height:28px; }
+.timeline-port-summary { min-height:var(--inventory-row-height); }
 .timeline-port-label { padding-left:24px; }
 .timeline-port .timeline-bar { background:#38bdf8; }
 .timeline-port .timeline-bar-closed, .timeline-port .timeline-bar-not_open,

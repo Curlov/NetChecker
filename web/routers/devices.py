@@ -1,5 +1,6 @@
 
 import ipaddress
+import json
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -8,6 +9,7 @@ from web.database import get_connection, get_write_connection
 from database import get_port_inventory, get_os_history, get_os_claims, get_os_claims_for_devices
 from os_analysis import summarize_claims
 from mac_analysis import analyze_mac
+from fingerprints import match_device as match_fingerprints
 from web.access import allowed_scopes, require_network
 
 
@@ -338,6 +340,30 @@ def get_device(
                                 (device_id,device['scope_id'])).fetchall()
         last_identity = db.execute("""SELECT data_json,observed_at FROM observations WHERE network_id=? AND device_id=?
             AND observation_type='host_discovery' ORDER BY id DESC LIMIT 1""", (network_id,device_id)).fetchone()
+        identification_row = db.execute("""SELECT data_json,source,observed_at FROM observations
+            WHERE network_id=? AND device_id=? AND observation_type='device_identification'
+            ORDER BY observed_at DESC,id DESC LIMIT 1""", (network_id,device_id)).fetchone()
+        device_identification = None
+        if identification_row:
+            try:
+                payload = json.loads(identification_row['data_json'] or '{}')
+                if isinstance(payload, dict) and payload.get('status') == 'confirmed':
+                    device_identification = dict(payload,
+                        source=identification_row['source'],
+                        observed_at=identification_row['observed_at'])
+            except (TypeError, ValueError):
+                pass
+        fingerprint_findings = match_fingerprints({
+            'ports': [port for port in ports if port['state'] == 'open']
+        })
+        fingerprint_identification = None
+        if classification is not None and device_identification is None:
+            eligible = [finding for finding in fingerprint_findings
+                        if finding['category'] == classification['category']]
+            if eligible:
+                fingerprint_identification = dict(
+                    max(eligible, key=lambda finding: finding['points']),
+                    status='suspected', confidence=classification['confidence'])
 
         # --------------------------------------------------
         # Klassifikationshistorie
@@ -408,6 +434,9 @@ def get_device(
         "classification": (
             dict(classification) if classification else None
         ),
+        "device_identification": device_identification,
+        "fingerprint_identification": fingerprint_identification,
+        "fingerprint_findings": fingerprint_findings,
         "presence": (
             dict(presence) if presence else None
         ),

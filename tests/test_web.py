@@ -1,6 +1,7 @@
 """Exercise ASGI directly, without starting a server or making network calls."""
 import asyncio
 from contextlib import ExitStack
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -107,6 +108,64 @@ class WebTest(unittest.TestCase):
         self.assertEqual(200,status)
         for field in ('mac_analysis','os_summary','os_claims','interfaces','identity_candidates','port_history'):
             self.assertIn(field,data)
+
+    def test_device_details_return_confirmed_device_identification(self):
+        payload = {'status':'confirmed','manufacturer':'Samsung','type':'Samsung Smart-TV',
+                   'name':'Samsung AU7179 75 TV','model':'GU75AU7179UXZG',
+                   'operating_system':'Tizen','network_type':'wireless'}
+        connection = sqlite3.connect(self.path)
+        connection.execute("""INSERT INTO observations(network_id,device_id,observation_type,
+            source,data_json) VALUES(?,?,'device_identification','samsung_smart_tv_api',?)""",
+            (self.network,self.ids[0],json.dumps(payload)))
+        connection.commit(); connection.close()
+
+        status, details = self.request(
+            f'/api/devices/{self.ids[0]}?network_id={self.network}')
+        self.assertEqual(200,status)
+        for field,value in payload.items():
+            self.assertEqual(value,details['device_identification'][field])
+        self.assertIn('observed_at',details['device_identification'])
+
+    def test_detail_handler_exposes_saved_service_fingerprint(self):
+        from classifier import classify_device
+        from classification_store import save_classification
+        from web.routers.devices import get_device
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("UPDATE devices SET display_name='Manuell vergeben' WHERE id=?",
+                           (self.ids[0],))
+        connection.execute("""INSERT INTO port_inventory(
+            network_id,device_id,protocol,port,state,product,version,service_observed_at)
+            VALUES(?,?,'tcp',443,'open','HP Integrated Lights-Out 5','5',CURRENT_TIMESTAMP)""",
+            (self.network,self.ids[0]))
+        connection.commit()
+        result = classify_device(database.get_inventory(
+            connection, self.ids[0], network_id=self.network)[0])
+        save_classification(connection,self.network,self.ids[0],result)
+        connection.commit(); connection.close()
+
+        details = get_device(self.ids[0], self.network)
+        self.assertEqual('Manuell vergeben', details['device']['display_name'])
+        self.assertEqual('hpe-ilo', details['fingerprint_identification']['rule_id'])
+        self.assertEqual('suspected', details['fingerprint_identification']['status'])
+        self.assertEqual('HPE iLO', details['classification']['subtype'])
+
+    def test_detail_handler_preserves_manual_name_with_confirmed_samsung(self):
+        from web.routers.devices import get_device
+        payload = {'status':'confirmed','manufacturer':'Samsung','type':'Samsung Smart-TV',
+                   'name':'Samsung AU7179 75 TV','model':'GU75AU7179UXZG',
+                   'operating_system':'Tizen'}
+        connection = sqlite3.connect(self.path)
+        connection.execute("UPDATE devices SET display_name='Samsung TV' WHERE id=?",
+                           (self.ids[0],))
+        connection.execute("""INSERT INTO observations(network_id,device_id,observation_type,
+            source,data_json) VALUES(?,?,'device_identification','samsung_smart_tv_api',?)""",
+            (self.network,self.ids[0],json.dumps(payload)))
+        connection.commit(); connection.close()
+        details = get_device(self.ids[0], self.network)
+        self.assertEqual('Samsung TV', details['device']['display_name'])
+        self.assertEqual('GU75AU7179UXZG', details['device_identification']['model'])
+        self.assertEqual('Tizen', details['device_identification']['operating_system'])
 
     def test_wrong_network_device_hidden(self):
         self.assertEqual(404,self.request(f'/api/devices/{self.ids[0]}?network_id={self.other_network}')[0])
@@ -1677,6 +1736,52 @@ class WebTest(unittest.TestCase):
             self.assertEqual(404, self.request(f'/api/timeline?network_id={self.other_network}')[0])
         with patch.dict(os.environ, {'NETCHECKER_API_KEY':'test'}):
             self.assertEqual(401, self.request(f'/api/timeline?network_id={self.network}')[0])
+
+    def test_timeline_past_day_keeps_current_device_and_port_status(self):
+        from web.routers.timeline import daily
+        device = self.ids[0]
+        connection = sqlite3.connect(self.path)
+        connection.execute("""INSERT INTO device_presence(network_id,device_id,state)
+            VALUES(?,?,'present') ON CONFLICT(network_id,device_id)
+            DO UPDATE SET state='present'""", (self.network, device))
+        connection.execute("""INSERT INTO port_inventory(network_id,device_id,protocol,port,state,ever_open)
+            VALUES(?,?,'tcp',443,'open',1)""", (self.network, device))
+        for observed, kind, data in [
+            ('2026-10-10 10:00:00', 'host_discovery', {}),
+            ('2026-10-10 10:05:00', 'tcp_port_scan',
+             {'ports':[{'protocol':'tcp','port':443,'state':'open'}]}),
+            ('2026-10-10 17:55:00', 'tcp_port_scan',
+             {'ports':[{'protocol':'tcp','port':443,'state':'closed'}]})]:
+            connection.execute("""INSERT INTO observations(network_id,device_id,observation_type,
+                observed_at,data_json) VALUES(?,?,?,?,?)""",
+                (self.network,device,kind,observed,json.dumps(data)))
+        connection.execute("""INSERT INTO changes(network_id,device_id,scan_run_id,change_type,detected_at)
+            VALUES(?,?,1,'DEVICE_MISSING','2026-10-10 18:00:00')""", (self.network,device))
+        connection.commit(); connection.close()
+
+        data = daily(self.network, date(2026,10,10), 'Europe/Berlin')
+        row = next(item for item in data['devices'] if item['id'] == device)
+        port = next(item for item in row['ports'] if item['key'] == 'tcp/443')
+        self.assertFalse(row['active'])
+        self.assertTrue(row['current_active'])
+        self.assertEqual('closed', port['status'])
+        self.assertEqual('open', port['current_status'])
+        device_intervals, port_intervals = row['intervals'], port['intervals']
+
+        connection = sqlite3.connect(self.path)
+        connection.execute("UPDATE device_presence SET state='missing' WHERE network_id=? AND device_id=?",
+                           (self.network,device))
+        connection.execute("""UPDATE port_inventory SET state='closed'
+            WHERE network_id=? AND device_id=? AND protocol='tcp' AND port=443""",
+            (self.network,device))
+        connection.commit(); connection.close()
+        data = daily(self.network, date(2026,10,10), 'Europe/Berlin')
+        row = next(item for item in data['devices'] if item['id'] == device)
+        port = next(item for item in row['ports'] if item['key'] == 'tcp/443')
+        self.assertFalse(row['current_active'])
+        self.assertEqual('closed', port['current_status'])
+        self.assertEqual(device_intervals, row['intervals'])
+        self.assertEqual(port_intervals, port['intervals'])
 
     def test_employee_registration_uses_source_ip_and_overwrites_manual_name(self):
         connection = sqlite3.connect(self.path)

@@ -86,6 +86,17 @@ def save_classification(connection, network_id, device_id, result):
     existing = connection.execute("""SELECT category,subtype,confidence,score,evidence_json,source
         FROM device_classifications WHERE network_id=? AND device_id=?""",
         (network_id,device_id)).fetchone()
+    if existing is not None:
+        # Preserve a manually fixed classification, and never let lower or
+        # equally confident contradictory evidence replace a saved result.
+        if existing['source'] in {'manual', 'user'}:
+            return False
+        current_confidence = int(existing['confidence'])
+        new_confidence = int(result['confidence'])
+        if (new_confidence < current_confidence
+                or (result['category'] != existing['category']
+                    and new_confidence <= current_confidence)):
+            return False
     changed = existing is None or tuple(existing) != values
     with atomic(connection):
         connection.execute("""INSERT INTO device_classifications(network_id,device_id,

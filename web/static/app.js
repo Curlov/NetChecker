@@ -6,6 +6,11 @@
 // ==========================================================
 
 const activeView = document.body.dataset.view || "list";
+const initialPageParams = new URLSearchParams(location.search);
+const requestedPageNetworkId = ['list', 'timeline'].includes(activeView) && /^\d+$/.test(initialPageParams.get('network_id') || '')
+    ? initialPageParams.get('network_id') : null;
+let pendingListDeviceId = activeView === 'list' && /^[1-9]\d*$/.test(initialPageParams.get('device_id') || '')
+    ? initialPageParams.get('device_id') : null;
 const API_KEY_SESSION_STORAGE_KEY = "netchecker.api-key";
 const apiKeyInput = document.querySelector("#api-key");
 const apiKeyForm = document.querySelector("#api-key-form");
@@ -82,6 +87,7 @@ const deviceTable = document.querySelector("#device-table");
 const detailPanel = document.querySelector("#detail-panel");
 const detailTitle = document.querySelector("#detail-title");
 const detailSubtitle = document.querySelector("#detail-subtitle");
+const detailTimelineLink = document.querySelector("#detail-timeline-link");
 
 const connectionStatus = document.querySelector("#connection-status");
 const lastUpdate = document.querySelector("#last-update");
@@ -108,6 +114,17 @@ let detailRequestId = 0;
 
 // Aktuell ausgewähltes Gerät
 let selectedDeviceId = null;
+
+function deviceViewHref(view, networkId, deviceId) {
+    const url = new URL(view, location.origin);
+    url.searchParams.set('network_id', String(networkId));
+    url.searchParams.set('device_id', String(deviceId));
+    return `${url.pathname}${url.search}`;
+}
+
+function deviceDetailTitle(ip, name, deviceId) {
+    return [ip, name].filter(Boolean).join(' - ') || `Gerät #${deviceId}`;
+}
 
 
 // ==========================================================
@@ -390,6 +407,7 @@ const deviceClassDesigns = {
     camera: {icon:'camera',label:'IP-Kamera'},
     power_device: {icon:'battery-charging',label:'USV / Stromversorgung'},
     single_board_computer: {icon:'cpu',label:'Single-Board-Computer'},
+    smart_tv: {icon:'monitor-smartphone',label:'Smart-TV'},
     unknown: {icon:'circle-question-mark',label:'Unbekannt'}
 };
 
@@ -520,8 +538,9 @@ async function loadNetworks(preserveSelection = false) {
         networkSelect.replaceChildren(...options);
 
     if (result.networks.length > 0) {
-        networkSelect.value = preserveSelection && result.networks.some(n => String(n.id) === current)
-            ? current : String(result.networks[0].id);
+        const preferredNetworkId = preserveSelection ? current : requestedPageNetworkId;
+        networkSelect.value = preferredNetworkId && result.networks.some(n => String(n.id) === preferredNetworkId)
+            ? preferredNetworkId : String(result.networks[0].id);
         if (previous && networkSelect.value !== previous) closeDeviceDetails();
         await loadCurrentView();
     } else {
@@ -600,7 +619,12 @@ async function loadDevices() {
 
         updateCategories();
         renderDevices();
-        if (selectedDeviceId !== null) {
+        if (pendingListDeviceId !== null) {
+            const requestedDeviceId = pendingListDeviceId;
+            pendingListDeviceId = null;
+            if (devices.some(device => String(device.id) === requestedDeviceId))
+                await showDevice(requestedDeviceId, true);
+        } else if (selectedDeviceId !== null) {
             if (devices.some(device => String(device.id) === selectedDeviceId)) {
                 await showDevice(selectedDeviceId, false);
             } else {
@@ -739,11 +763,6 @@ function addTableMessage(message) {
     cell.textContent = message;
 }
 
-function compactDeviceListValue(value, maxLength = 24) {
-    const text = displayValue(value);
-    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
-}
-
 function renderDevices() {
     const search = searchInput.value.toLowerCase().trim();
     const category = categorySelect.value;
@@ -808,16 +827,24 @@ function renderDevices() {
         for (const [index, value] of values.entries()) {
             const cell = row.insertCell();
             const fullText = displayValue(value);
-            cell.textContent = index === 2 || index === 3
-                ? compactDeviceListValue(value) : fullText;
+            cell.textContent = fullText;
             if (index === 2 || index === 3) cell.title = fullText;
         }
+
+        const timelineLink = document.createElement('a');
+        timelineLink.className = 'device-view-link';
+        timelineLink.href = deviceViewHref('/timeline', networkSelect.value, device.id);
+        timelineLink.textContent = '↗';
+        timelineLink.title = 'In Timeline öffnen';
+        timelineLink.setAttribute('aria-label', `Gerät ${device.ip || `#${device.id}`} in Timeline öffnen`);
+        timelineLink.addEventListener('click', event => event.stopPropagation());
+        row.cells[0].replaceChildren(timelineLink, document.createTextNode(` ${displayValue(device.ip)}`));
 
         row.cells[5].className =
             device.presence === "present"
                 ? "status-present"
                 : "status-other";
-        row.cells[3].replaceChildren(iconText(compactDeviceListValue(type),
+        row.cells[3].replaceChildren(iconText(displayValue(type),
             {tone:'info',icon:deviceClassDesign(device.category).icon}));
         row.cells[3].title = displayValue(type);
         row.cells[5].replaceChildren(iconText(displayValue(device.presence),
@@ -1068,6 +1095,9 @@ async function showDevice(deviceId, scroll = true) {
 
     if (!networkId) return;
 
+    if (detailTimelineLink)
+        detailTimelineLink.href = deviceViewHref('/timeline', networkId, deviceId);
+
     // Gerät auswählen und Zeile dauerhaft markieren.
     selectedDeviceId = String(deviceId);
     updateSelectedDevice();
@@ -1080,6 +1110,7 @@ async function showDevice(deviceId, scroll = true) {
     detailPanel.hidden = false;
     if (!sameDevice) {
         detailTitle.textContent = `Gerät #${deviceId}`;
+        detailTitle.dataset.fallbackName = '';
         detailSubtitle.textContent = "Lade Informationen ...";
     }
 
@@ -1104,10 +1135,12 @@ async function showDevice(deviceId, scroll = true) {
         const classification = data.classification;
         const presence = data.presence;
 
-        detailTitle.textContent =
-            device.display_name || device.hostname ||
-            data.addresses[0]?.ip ||
-            `Gerät #${deviceId}`;
+        const titleIp = data.addresses[0]?.ip ||
+            devices.find(item => String(item.id) === String(deviceId))?.ip;
+        const fallbackName = data.device_identification?.name || device.hostname;
+        detailTitle.dataset.fallbackName = fallbackName || '';
+        detailTitle.textContent = deviceDetailTitle(
+            titleIp, device.display_name || fallbackName, deviceId);
 
         detailSubtitle.textContent =
             `Geräte-ID: ${device.id} · Netzwerk-ID: ${networkId}`;
@@ -1121,6 +1154,8 @@ async function showDevice(deviceId, scroll = true) {
         addDetailLine(general, "MAC-Adresse", device.mac);
         addDetailLine(general, "Hersteller", device.vendor);
         addDetailLine(general, "Hostname", device.hostname);
+        const identified = data.device_identification;
+        const fingerprint = data.fingerprint_identification;
         const serverName = device.display_name || '';
         const hasDraft = sameDevice &&
             nameInput.value !== (nameInput.dataset.serverValue || '');
@@ -1135,6 +1170,36 @@ async function showDevice(deviceId, scroll = true) {
         addDetailLine(general, "Status", presence?.state,eventDesign(presence?.state));
         addDetailLine(general, "Erstmals gesehen", formatEventTime(device.first_seen));
         addDetailLine(general, "Zuletzt gesehen", formatEventTime(device.last_seen));
+
+        const hasAdvancedValue = value => value !== null && value !== undefined &&
+            String(value).trim() !== '' && String(value).trim() !== '-';
+        const firstAdvancedValue = (...values) => values.find(hasAdvancedValue);
+        const hasFingerprintData = fingerprint && Object.values(fingerprint).some(hasAdvancedValue);
+        const fingerprintRule = fingerprint ?
+            [fingerprint.rule_id, fingerprint.revision].filter(hasAdvancedValue).join('@') : null;
+        const advancedFields = [
+            ["Erkannter Gerätetyp", firstAdvancedValue(identified?.type, fingerprint?.subtype)],
+            ["Gerätename laut API", identified?.name],
+            ["Modell", identified?.model],
+            ["Hersteller laut Dienst", firstAdvancedValue(identified?.manufacturer, fingerprint?.manufacturer)],
+            ["Erkanntes Produkt", fingerprint?.matched_value],
+            ["Dienstversion", fingerprint?.service_version],
+            ["Betriebssystem laut API", identified?.operating_system],
+            ["Netzwerktyp laut API", identified?.network_type],
+            ["Geräteerkennung", identified?.status === 'confirmed' ? 'Bestätigt' :
+                hasFingerprintData ? 'Vermutet' : null],
+            ["Erkennungsquelle", firstAdvancedValue(identified?.source, fingerprint?.source)],
+            ["Fingerprint-Regel", fingerprintRule],
+            ["Regelquelle", fingerprint?.rule_source],
+            ["Letzte Erkennung", firstAdvancedValue(identified?.observed_at, fingerprint?.observed_at)],
+        ].filter(([, value]) => hasAdvancedValue(value));
+        const advanced = document.querySelector('#detail-advanced');
+        const advancedContent = document.querySelector('#detail-advanced-content');
+        advancedContent.replaceChildren();
+        for (const [label, value] of advancedFields)
+            addDetailLine(advancedContent, label, value);
+        advanced.hidden = advancedFields.length === 0;
+        if (!sameDevice || advanced.hidden) advanced.open = false;
 
         const mac = document.querySelector('#detail-mac');
         mac.replaceChildren();
@@ -1197,16 +1262,34 @@ async function showDevice(deviceId, scroll = true) {
         addDetailLine(cls, "Quelle", classification?.source);
         addDetailLine(cls, "Score", classification?.score);
 
+        let classificationReasons = [];
+        try {
+            const evidence = JSON.parse(classification?.evidence_json || '[]');
+            if (Array.isArray(evidence)) {
+                classificationReasons = evidence
+                    .map(item => item?.reason)
+                    .filter(reason => typeof reason === 'string' && reason.trim());
+            }
+        } catch (_) {
+            classificationReasons = [];
+        }
+        addDetailLine(cls, "Erkennungsgrund", classificationReasons.join(" · "));
+        const competingFingerprints = (data.fingerprint_findings || [])
+            .filter(item => item.category !== classification?.category)
+            .map(item => `${item.rule_id}: ${item.category}`);
+        addDetailLine(cls, "Weitere Fingerprint-Hinweise", competingFingerprints.join(" · "));
+
         // Betriebssystem
-        renderDetailTable(
-            document.querySelector("#detail-os"),
-            data.os_information,
-            [
+        const osDetails = document.querySelector("#detail-os");
+        if (data.os_information?.length) {
+            renderDetailTable(osDetails, data.os_information, [
                 ["name", "Betriebssystem"],
                 ["accuracy", "Genauigkeit"],
                 ["observed_at", "Erfasst"]
-            ]
-        );
+            ]);
+        } else {
+            osDetails.replaceChildren();
+        }
 
         // Adressen
         renderDetailTable(
@@ -1303,7 +1386,8 @@ document.querySelector('#detail-name-form')?.addEventListener('submit', async ev
         for (const device of devices) if (String(device.id) === deviceId) device.display_name = result.display_name;
         renderDevices();
         const current = devices.find(device => String(device.id) === deviceId);
-        detailTitle.textContent = result.display_name || current?.hostname || current?.ip || `Gerät #${deviceId}`;
+        detailTitle.textContent = deviceDetailTitle(
+            current?.ip, result.display_name || detailTitle.dataset.fallbackName || current?.hostname, deviceId);
         status.textContent = newerDraft ? 'Name gespeichert; neuer Entwurf noch offen.' : 'Name gespeichert.';
     } catch (error) {
         if (selectedDeviceId === deviceId && networkSelect.value === networkId)

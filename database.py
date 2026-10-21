@@ -2324,7 +2324,17 @@ def get_inventory(
                     observations.id DESC
 
                 LIMIT 1
-            ) AS os_scan_at
+            ) AS os_scan_at,
+
+            (
+                SELECT observations.data_json
+                FROM observations
+                WHERE observations.device_id = devices.id
+                  AND observations.observation_type = 'device_identification'
+                  AND (:network_id IS NULL OR observations.network_id=:network_id)
+                ORDER BY observations.observed_at DESC, observations.id DESC
+                LIMIT 1
+            ) AS device_identification_json
 
         FROM devices
 
@@ -2352,9 +2362,20 @@ def get_inventory(
             "os_scan_json"
         )
 
+        device_identification_json = device.pop("device_identification_json")
+
 
         device["ports"] = []
         device["os"] = None
+        device["device_identification"] = None
+
+        if device_identification_json:
+            try:
+                identification = json.loads(device_identification_json)
+                if isinstance(identification, dict) and identification.get("status") == "confirmed":
+                    device["device_identification"] = identification
+            except json.JSONDecodeError:
+                pass
 
 
         if port_scan_json:
@@ -2402,6 +2423,33 @@ def get_inventory(
             if history:
                 device['os'] = select_os(history)
             device['os_summary'] = summarize_claims(get_os_claims(connection, network_id, device['id']))
+            # Nmap's osclass device type is already stored in the enrichment
+            # observation. Expose it to the regular classifier without a scan
+            # or another persistent projection.
+            os_fingerprint = connection.execute("""SELECT data_json,observed_at FROM observations
+                WHERE network_id=? AND device_id=? AND observation_type='enrichment_result'
+                  AND observed_at>=datetime('now','-90 days')
+                ORDER BY id DESC LIMIT 8""", (network_id, device['id'])).fetchall()
+            device['os_classes'] = []
+            open_ports = {(port['protocol'], port['port']): port for port in device['ports']}
+            for observation in os_fingerprint:
+                try:
+                    payload = json.loads(observation['data_json'] or '{}')
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                classes = payload.get('os_classes') or []
+                if not device['os_classes'] and isinstance(classes, list) and classes:
+                    device['os_classes'] = [item for item in classes if isinstance(item, dict)]
+                for scanned in payload.get('ports') or ():
+                    if not isinstance(scanned, dict) or not isinstance(scanned.get('scripts'), list):
+                        continue
+                    port = open_ports.get((scanned.get('protocol'), scanned.get('port')))
+                    if (port is not None and not port.get('scripts') and scanned['scripts']
+                            and observation['observed_at'] >= (port.get('service_observed_at') or '')):
+                        port['scripts'] = [item for item in scanned['scripts'][:8]
+                                           if isinstance(item, dict)]
         device['mac_analysis'] = analyze_mac(device.get('mac'))
         inventory.append(
             device

@@ -1,6 +1,7 @@
 import ipaddress
 from collections import defaultdict
 from mac_analysis import analyze_mac
+from fingerprints import match_device as match_fingerprints
 from runtime_lock import exclusive_cycle
 
 from database import (
@@ -50,6 +51,9 @@ CATEGORY_LABELS = {
 
     "single_board_computer":
         "Single-Board-Computer",
+
+    "smart_tv":
+        "Smart-TV",
 
     "unknown":
         "Unbekannt",
@@ -117,6 +121,7 @@ def has_port(
 
         if (
             port.get("port") == port_number
+            and normalize(port.get("state")) == "open"
             and normalize(
                 port.get("protocol")
             ) == protocol
@@ -125,6 +130,39 @@ def has_port(
             return True
 
     return False
+
+
+def get_open_tcp_port(device, port_number):
+    """Return an open TCP port record, if present."""
+    for port in get_ports(device):
+        try:
+            number = int(port.get("port"))
+        except (TypeError, ValueError):
+            continue
+
+        if (
+            number == port_number
+            and normalize(port.get("protocol")) == "tcp"
+            and normalize(port.get("state")) == "open"
+        ):
+            return port
+
+    return None
+
+
+def is_apple_sync_service(port):
+    """Recognize the Apple sync/lockdown service on TCP 62078."""
+    if not port:
+        return False
+
+    service_text = " ".join(
+        normalize(port.get(field))
+        for field in ("service", "product", "version", "extrainfo", "ostype", "devicetype")
+    )
+    return any(
+        marker in service_text
+        for marker in ("iphone-sync", "iphone sync", "apple mobile device", "lockdown")
+    )
 
 
 def count_ports(
@@ -161,9 +199,7 @@ def contains_service_text(
 
         combined = " ".join(
             [
-                normalize(
-                    port.get("service")
-                ),
+                normalize(port.get("service")) if normalize(port.get('method')) != 'table' else '',
 
                 normalize(
                     port.get("product")
@@ -174,6 +210,7 @@ def contains_service_text(
                 ),
                 normalize(port.get('extrainfo')),
                 normalize(port.get('ostype')),
+                normalize(port.get('devicetype')),
                 normalize(' '.join(port.get('cpe') or [])),
             ]
         )
@@ -351,7 +388,8 @@ def confidence_label(
 
 def detect_subtype(
     device,
-    category
+    category,
+    fingerprints=(),
 ):
     """
     Bestimmt einen genaueren Untertyp.
@@ -379,6 +417,11 @@ def detect_subtype(
         family = (device.get('os_summary') or {}).get('family')
         if family and not family.get('stale'):
             os_name = normalize(family['value'])
+
+    matching_subtypes = [item for item in fingerprints
+                         if item['category'] == category and item.get('subtype')]
+    if matching_subtypes:
+        return max(matching_subtypes, key=lambda item: item['points'])['subtype']
 
 
     # ======================================================
@@ -420,22 +463,13 @@ def detect_subtype(
 
     if category == "virtualization":
 
-        if (
-            contains_service_text(
-                device,
-                "proxmox virtual environment"
-            )
-            or contains_service_text(
-                device,
-                "proxmox datacenter"
-            )
-            or has_port(
-                device,
-                8006
-            )
-        ):
+        if (contains_service_text(device, "proxmox virtual environment")
+                or contains_service_text(device, "proxmox datacenter")):
 
             return "Proxmox-Host"
+
+        if has_port(device, 8006):
+            return "Möglicher Proxmox-Host"
 
 
         if "proxmox" in vendor:
@@ -622,6 +656,11 @@ def detect_subtype(
             return "iPhone / iPad / iOS-Gerät"
 
 
+        if get_open_tcp_port(device, 62078):
+
+            return "Mögliches iPhone / iPad"
+
+
         return "Apple-Gerät"
 
 
@@ -688,6 +727,11 @@ def detect_subtype(
 
         return "Single-Board-Computer"
 
+    if category == "smart_tv":
+        identification = device.get('device_identification') or {}
+        return ("Samsung Smart-TV" if identification.get('status') == 'confirmed'
+                else "Möglicher Samsung Smart-TV")
+
 
     return "-"
 
@@ -727,6 +771,21 @@ def classify_device(device):
         if family and not family.get('stale'):
             os_name = normalize(family['value'])
 
+    identification = device.get("device_identification") or {}
+    samsung_confirmed = (identification.get("status") == "confirmed"
+            and identification.get("source") == "samsung_smart_tv_api"
+            and normalize(identification.get("manufacturer")) == "samsung"
+            and normalize(identification.get("type")) == "samsung smart-tv")
+    if samsung_confirmed:
+        model = identification.get("model")
+        detail = f" (Modell {model})" if model else ""
+        add_score(scores, evidence, "smart_tv", 200,
+                  f"Samsung-Geräte-API bestätigt Smart-TV{detail}")
+
+    fingerprint_matches = match_fingerprints(device)
+    for finding in fingerprint_matches:
+        add_score(scores, evidence, finding['category'], finding['points'], finding['reason'])
+
 
     # ======================================================
     # Router / Firewall
@@ -738,7 +797,7 @@ def classify_device(device):
             scores,
             evidence,
             "firewall_router",
-            90,
+            55,
             "Hersteller ist Sophos"
         )
 
@@ -764,7 +823,7 @@ def classify_device(device):
             scores,
             evidence,
             "voip_phone",
-            95,
+            45,
             "Hersteller ist Yealink"
         )
 
@@ -779,7 +838,7 @@ def classify_device(device):
             scores,
             evidence,
             "camera",
-            95,
+            45,
             "Hersteller ist Reolink"
         )
 
@@ -797,7 +856,7 @@ def classify_device(device):
             scores,
             evidence,
             "power_device",
-            95,
+            55,
             "Hersteller ist APC / Schneider Electric"
         )
 
@@ -812,7 +871,7 @@ def classify_device(device):
             scores,
             evidence,
             "printer",
-            90,
+            45,
             "Hersteller ist Epson"
         )
 
@@ -869,7 +928,7 @@ def classify_device(device):
             scores,
             evidence,
             "single_board_computer",
-            75,
+            45,
             "Hersteller ist Raspberry Pi"
         )
 
@@ -884,7 +943,7 @@ def classify_device(device):
             scores,
             evidence,
             "network_device",
-            70,
+            45,
             "Hersteller ist Ubiquiti"
         )
 
@@ -898,7 +957,7 @@ def classify_device(device):
             scores,
             evidence,
             "network_device",
-            85,
+            50,
             "Hersteller ist MikroTik / RouterBOARD"
         )
 
@@ -962,6 +1021,24 @@ def classify_device(device):
             "Ein erkannter Dienst enthält Proxmox"
         )
 
+    # osclass is already present in saved Nmap XML observations. Nmap may
+    # report several competing classes; the regular score margin handles that.
+    os_class_types = {normalize(item.get('type')) for item in device.get('os_classes') or ()
+                      if isinstance(item, dict)}
+    if 'wap' in os_class_types:
+        add_score(scores, evidence, 'network_device', 55,
+                  'Nmap-Betriebssystemfingerprint meldet Gerätetyp WAP')
+    if 'printer' in os_class_types:
+        add_score(scores, evidence, 'printer', 55,
+                  'Nmap-Betriebssystemfingerprint meldet Drucker')
+    if 'router' in os_class_types:
+        add_score(scores, evidence, 'firewall_router', 55,
+                  'Nmap-Betriebssystemfingerprint meldet Router')
+    if any(normalize(port.get('devicetype')) == 'wap' for port in get_ports(device)
+           if port.get('state') == 'open'):
+        add_score(scores, evidence, 'network_device', 60,
+                  'Nmap-Dienstfingerprint meldet Gerätetyp WAP')
+
 
     if has_port(
         device,
@@ -975,6 +1052,25 @@ def classify_device(device):
             75,
             "TCP-Port 8006 ist typisch für Proxmox VE"
         )
+
+    if has_port(device, 8007):
+        add_score(scores, evidence, 'virtualization', 25,
+                  'TCP-Port 8007 kann auf Proxmox Backup Server hinweisen')
+
+    if 'samsung' in vendor and get_open_tcp_port(device, 8001):
+        add_score(scores, evidence, 'smart_tv', 50,
+                  'Samsung-MAC und offener TCP-Port 8001 weisen auf Smart-TV hin')
+        if get_open_tcp_port(device, 8002):
+            add_score(scores, evidence, 'smart_tv', 20,
+                      'Auch Samsung-TV-Port 8002 ist offen')
+
+    if 'yealink' in vendor and (has_port(device, 5060) or has_port(device, 5061)):
+        add_score(scores, evidence, 'voip_phone', 20,
+                  'Yealink-MAC und SIP-Port sind gemeinsam vorhanden')
+
+    if 'reolink' in vendor and has_port(device, 9000):
+        add_score(scores, evidence, 'camera', 20,
+                  'Reolink-MAC und TCP-Port 9000 sind gemeinsam vorhanden')
 
 
     # ======================================================
@@ -1293,6 +1389,66 @@ def classify_device(device):
         )
 
 
+    # ======================================================
+    # Apple-Mobilgeräte: iphone-sync auf TCP 62078
+    # ======================================================
+
+    sync_port = get_open_tcp_port(device, 62078)
+
+    if sync_port:
+        apple_signals = []
+
+        if is_apple_sync_service(sync_port):
+            apple_signals.append((
+                25,
+                "TCP-Port 62078 meldet den Apple-Dienst iphone-sync"
+            ))
+
+        if "apple" in vendor:
+            apple_signals.append((
+                10,
+                "MAC-Hersteller weist zusätzlich auf Apple hin"
+            ))
+
+        apple_signals.append((
+            60,
+            "TCP-Port 62078 ist offen; Apple-Mobilgerät möglich"
+        ))
+
+        apple_base_score = scores.get("apple_device", 0)
+        baseline_scores = sorted(
+            scores.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+
+        # A newly seen port must not displace a category that existing
+        # evidence already classifies. Apple evidence can still strengthen
+        # an Apple result that was already leading.
+        allowed_points = sum(points for points, _ in apple_signals)
+        if (
+            baseline_scores
+            and baseline_scores[0][0] != "apple_device"
+            and baseline_scores[0][1] >= MIN_CLASSIFICATION_SCORE
+        ):
+            allowed_points = max(
+                0,
+                baseline_scores[0][1] - apple_base_score - 1
+            )
+
+        for points, reason in apple_signals:
+            applied_points = min(points, allowed_points)
+            if applied_points:
+                add_score(
+                    scores,
+                    evidence,
+                    "apple_device",
+                    applied_points,
+                    reason
+                )
+                allowed_points -= applied_points
+
+
     local_mac = is_locally_administered_mac(
         device.get("mac")
     )
@@ -1397,7 +1553,8 @@ def classify_device(device):
 
     subtype = detect_subtype(
         device,
-        best_category
+        best_category,
+        fingerprint_matches,
     )
 
 
@@ -1426,6 +1583,8 @@ def classify_device(device):
 
         "evidence":
             best_evidence,
+
+        **({"source": "samsung_smart_tv_api"} if best_category == "smart_tv" and samsung_confirmed else {}),
 
         "local_mac":
             local_mac,

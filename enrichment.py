@@ -31,6 +31,7 @@ from network import (
     get_interface_info,
 )
 from netchecker_config import nmap_profile
+from device_enrichment import matching_enrichers, get_enricher
 
 
 # ==========================================================
@@ -1355,6 +1356,57 @@ def enrich_services(connection, network_id, scan_run_id, device):
             'timeout':result.get('status')=='timeout','stage':'service_light','os':None}
 
 
+def device_enrichment_due(connection, network_id, device, now=None):
+    """Return matching device API handlers whose retry window has elapsed."""
+    now = now or datetime.now(timezone.utc)
+    due = []
+    for handler in matching_enrichers(device):
+        latest = connection.execute("""SELECT data_json,observed_at FROM observations
+            WHERE network_id=? AND device_id=?
+              AND observation_type='device_enrichment_attempt' AND source=?
+            ORDER BY id DESC LIMIT 1""",
+            (network_id, device['id'], handler.source)).fetchone()
+        if latest is not None:
+            try:
+                attempted = datetime.strptime(latest['observed_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                payload = json.loads(latest['data_json'] or '{}')
+            except (TypeError, ValueError):
+                attempted, payload = now - timedelta(days=8), {}
+            if not isinstance(payload, dict):
+                payload = {}
+            interval = timedelta(days=7) if payload.get('status') == 'confirmed' else timedelta(hours=1)
+            if now - attempted < interval:
+                continue
+        due.append(handler.source)
+    return due
+
+
+def run_device_enricher(connection, network_id, scan_run_id, device, source):
+    """Run and persist one targeted, read-only manufacturer identification."""
+    handler = get_enricher(source)
+    if handler is None or not handler.matches(device):
+        return {'status': 'skipped', 'reason': 'candidate_no_longer_matches'}
+    try:
+        result = handler.probe(device)
+    except Exception:
+        # Device APIs are untrusted network inputs; one broken endpoint must
+        # never abort the regular enrichment cycle.
+        result = {'status': 'error', 'reason': 'handler_error'}
+    result = dict(result or {})
+    result.setdefault('status', 'error')
+    with atomic(connection):
+        if result.get('status') == 'confirmed':
+            connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+                observation_type,source,data_json) VALUES(?,?,?,'device_identification',?,?)""",
+                (network_id, device['id'], scan_run_id, source,
+                 json.dumps(result, ensure_ascii=False)))
+        connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+            observation_type,source,data_json) VALUES(?,?,?,'device_enrichment_attempt',?,?)""",
+            (network_id, device['id'], scan_run_id, source,
+             json.dumps(result, ensure_ascii=False)))
+    return result
+
+
 # ==========================================================
 # Kandidaten auswählen
 # ==========================================================
@@ -1392,6 +1444,7 @@ def get_enrichment_targets(
 
     targets = []
     service_candidates = []
+    device_enrichment_candidates = []
 
 
     stats = {
@@ -1403,6 +1456,7 @@ def get_enrichment_targets(
         "targets": 0,
         "service_targets": 0,
         "service_deferred": 0,
+        "device_targets": 0,
     }
 
 
@@ -1442,6 +1496,10 @@ def get_enrichment_targets(
         service_due, attempted_at = service_enrichment_due(connection,network_id,device)
         if service_due and not force:
             service_candidates.append((attempted_at,dict(device,_service_ports=service_due)))
+
+        due_device_enrichers = device_enrichment_due(connection, network_id, device)
+        if due_device_enrichers:
+            device_enrichment_candidates.append((device, due_device_enrichers))
 
 
         if not force:
@@ -1517,10 +1575,24 @@ def get_enrichment_targets(
         ] += 1
 
 
-    return (
-        targets + select_service_targets(targets,service_candidates,stats),
-        stats
-    )
+    selected = targets + select_service_targets(targets,service_candidates,stats)
+    selected_by_id = {device['id']: index for index, (device, _) in enumerate(selected)}
+    for device, sources in device_enrichment_candidates:
+        index = selected_by_id.get(device['id'])
+        if index is None:
+            selected.append((dict(device, _enrichment_goal='device'), classify_device(device)))
+            index = len(selected) - 1
+            selected_by_id[device['id']] = index
+            stats['targets'] += 1
+        selected_device, classification = selected[index]
+        selected_device = dict(selected_device)
+        selected_device['_device_enrichers'] = list(dict.fromkeys(
+            (selected_device.get('_device_enrichers') or []) + sources
+        ))
+        selected[index] = (selected_device, classification)
+        stats['device_targets'] += 1
+
+    return selected, stats
 
 
 def select_service_targets(os_targets, candidates, stats):
@@ -2378,11 +2450,15 @@ def run_enrichment(
             if device.get('_enrichment_goal') == 'service':
                 print('  Stufe: Service-LIGHT auf bekannten offenen TCP-Ports; keine OS-Erkennung')
                 result = enrich_services(connection,network_id,scan_run_id,device)
+            elif device.get('_enrichment_goal') == 'device':
+                result = {'success': True, 'technical_error': False,
+                          'temporary_unreachable': False, 'timeout': False,
+                          'stage': 'device_api', 'os': None}
             else:
                 result = enrich_device(connection,network_id,scan_run_id,device,force=force)
 
 
-            if result[
+            if result.get('stage') != 'device_api' and result[
                 "temporary_unreachable"
             ]:
 
@@ -2391,7 +2467,7 @@ def run_enrichment(
                 failed += 1
 
 
-            elif result[
+            elif result.get('stage') != 'device_api' and result[
                 "technical_error"
             ]:
 
@@ -2407,7 +2483,7 @@ def run_enrichment(
                     timeouts += 1
 
 
-            else:
+            elif result.get('stage') != 'device_api':
 
                 processed += 1
 
@@ -2432,6 +2508,17 @@ def run_enrichment(
                 else:
 
                     without_os += 1
+
+            for source in device.get('_device_enrichers') or ():
+                identification = run_device_enricher(
+                    connection, network_id, scan_run_id, device, source
+                )
+                if identification.get('status') == 'confirmed':
+                    print(f"  Geräte-API {source}: bestätigt")
+                else:
+                    print(f"  Geräte-API {source}: {identification.get('reason') or 'nicht erkannt'}")
+            if result.get('stage') == 'device_api':
+                processed += 1
 
 
             # ==================================================

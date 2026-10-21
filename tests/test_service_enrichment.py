@@ -47,8 +47,10 @@ class ServiceEnrichmentTest(unittest.TestCase):
         self.assertEqual('service',targets[0][0]['_enrichment_goal'])
 
     def test_high_classification_still_selects_services(self):
-        self.prepared(os_known=False)
+        device = self.prepared(os_known=False)
         self.db.execute("UPDATE devices SET vendor='Yealink'"); self.db.commit()
+        self.ports(device,[{'protocol':'tcp','port':5060,'state':'open',
+                            'service':'sip','product':'Yealink SIP','method':'probed'}])
         targets,stats = self.select()
         self.assertEqual(1,stats['classified'])
         self.assertEqual('service',targets[0][0]['_enrichment_goal'])

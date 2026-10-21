@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "revision": "2026-10-21.1",
+  "source": "NetChecker curated rules over Nmap results",
+  "rules": [
+    {
+      "id": "proxmox-ve-daemon", "category": "virtualization", "subtype": "Proxmox VE",
+      "manufacturer": "Proxmox", "points": 110,
+      "any": [{"field": "product", "contains": "pve-api-daemon"},
+              {"field": "cpe", "contains": "proxmox:proxmox_virtual_environment"}]
+    },
+    {
+      "id": "proxmox-backup", "category": "virtualization", "subtype": "Proxmox Backup Server",
+      "manufacturer": "Proxmox", "points": 110,
+      "any": [{"field": "product", "contains": "proxmox-backup-proxy"},
+              {"field": "product", "contains": "Proxmox Backup Server"}]
+    },
+    {
+      "id": "hpe-ilo", "category": "network_device", "subtype": "HPE iLO",
+      "manufacturer": "HPE", "points": 95,
+      "any": [{"field": "product", "contains": "Integrated Lights-Out"},
+              {"field": "product", "contains": "HPE iLO"},
+              {"field": "product", "contains": "HP iLO"}]
+    },
+    {
+      "id": "aruba-instant-on", "category": "network_device", "subtype": "HPE Aruba Instant On",
+      "manufacturer": "HPE Aruba", "points": 95,
+      "any": [{"field": "product", "contains": "Aruba Instant On"},
+              {"field": "script", "contains": "Aruba Instant On"}]
+    },
+    {
+      "id": "ubiquiti-unifi", "category": "network_device", "subtype": "Ubiquiti UniFi",
+      "manufacturer": "Ubiquiti", "points": 85,
+      "any": [{"field": "product", "contains": "UniFi"},
+              {"field": "script", "contains": "Ubiquiti UniFi"}]
+    },
+    {
+      "id": "yealink-service", "category": "voip_phone", "subtype": "Yealink VoIP-Telefon",
+      "manufacturer": "Yealink", "points": 90,
+      "any": [{"field": "product", "contains": "Yealink"},
+              {"field": "cpe", "contains": "yealink:"}]
+    },
+    {
+      "id": "reolink-service", "category": "camera", "subtype": "Reolink IP-Kamera",
+      "manufacturer": "Reolink", "points": 90,
+      "any": [{"field": "product", "contains": "Reolink"},
+              {"field": "cpe", "contains": "reolink:"}]
+    },
+    {
+      "id": "ipp-printer", "category": "printer", "subtype": "Netzwerkdrucker",
+      "points": 55,
+      "any": [{"field": "product", "contains": "Internet Printing Protocol"},
+              {"field": "product", "contains": "IPP Printer"},
+              {"field": "devicetype", "contains": "printer"}]
+    }
+  ]
+}
