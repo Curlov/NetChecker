@@ -13,6 +13,12 @@ Topologie-/Klassifikationsarbeit. Discovery, Detail und Enrichment laufen seriel
 fünf bzw. 30 Minuten sind Wartezeiten nach Abschluss. Lange Scans verschieben
 die nächste Discovery. Der schnelle Detail-Scan verwendet 100 häufige TCP-Ports.
 Service-/OS-Erkennung erfolgt im LIGHT-/DEEP-Enrichment.
+Geräte, die Discovery erstmals in einem Netzwerk speichert, erhalten direkt
+nach diesem Lauf einen eigenen Detailscan (`detail_initial`). Dafür wartet
+NetChecker nicht auf das reguläre Detailintervall. Ist der reguläre Detailscan
+gleichzeitig fällig, überspringt er Geräte mit erfolgreichem Erstscan; bei
+einem fehlgeschlagenen Erstscan bleiben sie für ihn vorgesehen. Der Erstscan
+verschiebt den regulären Detailzeitpunkt nicht.
 
 Service-LIGHT wird zusätzlich unabhängig vom gespeicherten Betriebssystem und
 der Geräteklassifikation ausgewählt. Es untersucht ausschließlich bereits

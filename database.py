@@ -13,6 +13,7 @@ IP_MATCH_WINDOW_MINUTES = 60
 # Erst nach so vielen aufeinanderfolgenden fehlenden
 # Discovery-Läufen gilt ein Gerät als verschwunden.
 MISSING_CONFIRMATION_SCANS = 2
+WEB_REGISTRATION_GRACE_MINUTES = 15
 
 
 from runtime_config import DATABASE_PATH
@@ -855,6 +856,23 @@ def get_os_history(connection, network_id, device_id):
     return history
 
 
+def get_rdp_ntlm_info(connection, network_id, device_id):
+    """Return the latest successful, structured RDP NTLM observation."""
+    row = connection.execute("""SELECT source,data_json,observed_at FROM observations
+        WHERE network_id=? AND device_id=? AND observation_type='rdp_ntlm_info'
+          AND source='rdp_ntlm_info'
+        ORDER BY observed_at DESC,id DESC LIMIT 1""", (network_id, device_id)).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row['data_json'] or '{}')
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return dict(payload, source=row['source'], observed_at=row['observed_at'])
+
+
 # ==========================================================
 # Betriebssystem speichern
 # ==========================================================
@@ -1690,6 +1708,17 @@ def detect_discovery_changes(
         )
 
 
+        recent_web_registrations = {
+            row['device_id'] for row in connection.execute('''
+                SELECT DISTINCT device_id FROM observations
+                WHERE network_id=? AND source='web_registration'
+                  AND observation_type='host_discovery'
+                  AND observed_at >= datetime('now', ?)
+                  AND observed_at <= CURRENT_TIMESTAMP
+            ''', (network_id, f'-{WEB_REGISTRATION_GRACE_MINUTES} minutes'))
+        }
+
+
         for device_id, presence in (
             presence_states.items()
         ):
@@ -1698,6 +1727,11 @@ def detect_discovery_changes(
                 continue
 
             if device_id in current_ids:
+                continue
+
+            # An HTTP registration is direct reachability evidence even when
+            # Nmap's host discovery receives no reply from a mobile device.
+            if device_id in recent_web_registrations:
                 continue
 
 
@@ -1870,7 +1904,7 @@ def get_previous_port_scan_before(
 
           AND observations.scan_run_id < ?
 
-          AND scan_runs.scan_type = 'detail'
+          AND scan_runs.scan_type IN ('detail', 'detail_initial')
 
           AND scan_runs.status IN (
               'completed',

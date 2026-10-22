@@ -197,6 +197,9 @@ def run_discovery_cycle(
         "discovery"
     )
 
+    known_device_ids = {row['device_id'] for row in connection.execute(
+        'SELECT DISTINCT device_id FROM addresses WHERE network_id=?', (network_id,))}
+
 
     try:
 
@@ -307,6 +310,8 @@ def run_discovery_cycle(
                 host[
                     "device_id"
                 ] = device_id
+                host['new_device'] = device_id not in known_device_ids
+                known_device_ids.add(device_id)
 
 
                 processed_hosts += 1
@@ -468,7 +473,10 @@ def run_discovery_cycle(
 def run_detail_cycle(
     connection,
     network_id,
-    hosts
+    hosts,
+    *,
+    scan_type='detail',
+    successful_device_ids=None,
 ):
     """
     Führt wiederkehrende Detail-Scans durch.
@@ -492,7 +500,7 @@ def run_detail_cycle(
     scan_run_id = start_scan_run(
         connection,
         network_id,
-        "detail"
+        scan_type
     )
 
 
@@ -508,7 +516,7 @@ def run_detail_cycle(
 
         print()
         print("=" * 80)
-        print("Detail-Scan")
+        print("Erstscan neuer Geräte" if scan_type == 'detail_initial' else "Detail-Scan")
         print("=" * 80)
 
         print(
@@ -584,6 +592,8 @@ def run_detail_cycle(
                     scan_run_id,
                     host
                 )
+                if successful_device_ids is not None:
+                    successful_device_ids.add(host['device_id'])
 
 
                 # ==================================================
@@ -745,6 +755,30 @@ def run_detail_cycle(
 
 
         return False
+
+
+# ==========================================================
+# Erstscan nach Discovery
+# ==========================================================
+
+def run_initial_detail_cycle(connection, network_id, discovered_hosts):
+    """Scan newly created devices once, independently of the regular timer."""
+    new_hosts = []
+    seen_ids = set()
+    for host in discovered_hosts:
+        device_id = host.get('device_id')
+        if (host.get('new_device') and device_id is not None and host.get('ip')
+                and device_id not in seen_ids):
+            new_hosts.append(host)
+            seen_ids.add(device_id)
+    if not new_hosts:
+        return set()
+
+    successful_device_ids = set()
+    if run_detail_cycle(connection, network_id, new_hosts, scan_type='detail_initial',
+                        successful_device_ids=successful_device_ids):
+        run_classification_cycle(connection, network_id, 'nach Erstscan')
+    return successful_device_ids
 
 
 # ==========================================================
@@ -982,6 +1016,7 @@ def main():
         while True:
 
             now = time.monotonic()
+            initially_scanned_ids = set()
 
 
             # ==================================================
@@ -1018,10 +1053,13 @@ def main():
                         "nach Discovery"
                     )
 
-
                     next_discovery_at = (
                         time.monotonic()
                         + timing_value("discovery_interval_seconds")
+                    )
+
+                    initially_scanned_ids = run_initial_detail_cycle(
+                        connection, network_id, latest_hosts
                     )
 
 
@@ -1046,13 +1084,10 @@ def main():
                 >= next_detail_at
             ):
 
-                detail_ok = (
-                    run_detail_cycle(
-                        connection,
-                        network_id,
-                        latest_hosts
-                    )
-                )
+                regular_hosts = [host for host in latest_hosts
+                                 if host['device_id'] not in initially_scanned_ids]
+                detail_ok = (run_detail_cycle(connection, network_id, regular_hosts)
+                             if regular_hosts else True)
 
 
                 if detail_ok:

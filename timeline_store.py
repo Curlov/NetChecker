@@ -74,7 +74,7 @@ def change_projection(where=''):
 
 def migrate_timeline_events(connection):
     connection.execute("""
-        CREATE TABLE timeline_events (
+        CREATE TABLE IF NOT EXISTS timeline_events (
             source_kind TEXT NOT NULL, source_id INTEGER NOT NULL, port_index INTEGER NOT NULL,
             network_id INTEGER NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
             device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -92,15 +92,15 @@ def migrate_timeline_events(connection):
         ('seen_open', 'network_id,device_id,protocol,port,at',
          " WHERE kind IN (3,4) AND (state='open' OR kind=4)"),
     ]:
-        connection.execute(f'CREATE INDEX idx_timeline_{name} ON timeline_events({columns}){condition}')
+        connection.execute(f'CREATE INDEX IF NOT EXISTS idx_timeline_{name} ON timeline_events({columns}){condition}')
     for table, source_kind, projection in [
         ('observations', 'observation', observation_projection),
         ('changes', 'change', change_projection),
     ]:
-        connection.execute('INSERT INTO timeline_events ' + projection())
+        connection.execute('INSERT OR IGNORE INTO timeline_events ' + projection())
         alias = 'o' if table == 'observations' else 'c'
         insert = 'INSERT INTO timeline_events ' + projection(f'AND {alias}.id=NEW.id') + ';'
         delete = f"DELETE FROM timeline_events WHERE source_kind='{source_kind}' AND source_id=OLD.id;"
         for operation, body in [('INSERT', insert), ('UPDATE', delete + insert), ('DELETE', delete)]:
-            connection.execute(f"""CREATE TRIGGER timeline_{table}_{operation.lower()}
+            connection.execute(f"""CREATE TRIGGER IF NOT EXISTS timeline_{table}_{operation.lower()}
                 AFTER {operation} ON {table} BEGIN {body} END""")

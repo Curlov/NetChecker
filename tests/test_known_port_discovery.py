@@ -92,6 +92,14 @@ class KnownPortDiscoveryTest(unittest.TestCase):
         database.detect_detail_changes(self.db,self.network,run)
         self.assertEqual(1,self.db.execute("SELECT COUNT(*) FROM changes WHERE change_type='PORT_NOT_OPEN'").fetchone()[0])
 
+    def test_regular_detail_compares_against_initial_detail(self):
+        self.store_scan([{'protocol':'tcp','port':443,'state':'open'}],
+                        scan_type='detail_initial',covered='443')
+        run = self.store_scan([],scan_type='detail',covered='443')
+        database.detect_detail_changes(self.db,self.network,run)
+        self.assertEqual(1,self.db.execute("""SELECT COUNT(*) FROM changes
+            WHERE change_type='PORT_NOT_OPEN' AND device_id=?""",(self.device,)).fetchone()[0])
+
     def test_filtered_and_incomplete_scans_do_not_close_port(self):
         self.store_scan([{'protocol':'tcp','port':22,'state':'open'}])
         self.known_scan(22,'filtered')

@@ -676,6 +676,7 @@ function renderTopologyGraph(data) {
         selectedManualNodeId = null;
         selectedRoomId = null;
         selectedTopologyNodeKey = null;
+        selectedTopologyLinkId = null;
     }
     topologyLayoutId = data.layout?.layout?.id ?? null;
     topologyRooms = data.layout?.rooms || [];
@@ -2100,6 +2101,7 @@ function renderTopologyGraph(data) {
     refreshTopologyRoomShapes();
     redrawManualLinks({all:true});
     if (selectedRoomId !== null) raiseTopologyRoomToFront(selectedRoomId);
+    if (selectedTopologyLinkId !== null) raiseTopologyLinkToFront(selectedTopologyLinkId);
 }
 
 function topologyRenderWithAddedLink(link) {
@@ -2182,6 +2184,20 @@ function selectTopologyLink(link) {
         group.classList.remove('topology-room-selected','topology-node-selected'));
     document.querySelectorAll('.topology-manual-link').forEach(group =>
         group.classList.toggle('topology-manual-link-selected',Number(group.dataset.linkId)===selectedTopologyLinkId));
+    raiseTopologyLinkToFront(selectedTopologyLinkId);
+}
+
+function raiseTopologyLinkToFront(linkId) {
+    const graph=document.querySelector('#topology-graph');
+    if (!graph) return;
+    const selectedGroup=[...graph.children].find(item =>
+        item.classList.contains('topology-manual-link') && Number(item.dataset.linkId)===Number(linkId));
+    if (!selectedGroup) return;
+    // Keep devices above connections, while the selected connection and its
+    // corner handles paint above every other connection's hit area.
+    const firstNode=[...graph.children].find(item => item.classList.contains('topology-node'));
+    if (firstNode) graph.insertBefore(selectedGroup,firstNode);
+    else graph.appendChild(selectedGroup);
 }
 
 function raiseTopologyRoomToFront(roomId) {
@@ -2316,6 +2332,15 @@ function topologyMenuButton(label,action,{secondary=false,danger=false}={}) {
     button.addEventListener('click',action);
     topologyMenu().appendChild(button);
     return button;
+}
+
+function topologyMenuLink(label,href) {
+    const link = document.createElement('a');
+    link.className = 'topology-menu-action';
+    link.href = href;
+    link.textContent = label;
+    topologyMenu().appendChild(link);
+    return link;
 }
 
 function menuBackButton(node) {
@@ -2766,12 +2791,10 @@ function openTopologyContextMenu(x,y,node) {
     menu.appendChild(description);
     topologyMenuButton('Verbindung ziehen',() => topologyArmConnection({kind:'node',node}));
     if (node.device) {
-        topologyMenuButton('Gerätedetails öffnen',() => {
-            closeTopologyContextMenu(); void showDevice(node.device.id,true);
-        });
-        topologyMenuButton('Geräte- und Scaninformationen anzeigen',() => {
-            closeTopologyContextMenu(); void showDevice(node.device.id,false);
-        },{secondary:true});
+        const detailsUrl = new URL('/list', location.origin);
+        detailsUrl.searchParams.set('network_id', networkSelect.value);
+        detailsUrl.searchParams.set('device_id', String(node.device.id));
+        topologyMenuLink('Gerätedetails öffnen', `${detailsUrl.pathname}${detailsUrl.search}`);
     }
     if (node.device) {
         topologyMenuButton(node.manual

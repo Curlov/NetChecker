@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+import re
 
 from classifier import classify_device
 from scan_parser import parse_services, scan_metadata
@@ -1028,6 +1029,90 @@ def execute_nmap(
     return parsed_result
 
 
+RDP_NTLM_FIELDS = {
+    'Target_Name',
+    'NetBIOS_Domain_Name',
+    'NetBIOS_Computer_Name',
+    'DNS_Domain_Name',
+    'DNS_Computer_Name',
+    'DNS_Tree_Name',
+    'Product_Version',
+}
+
+
+def parse_windows_product_version(value):
+    """Split the internal Windows major.minor.build value without guessing edition."""
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'\s*(\d+)\.(\d+)\.(\d+)\s*', value)
+    if not match:
+        return None
+    return {
+        'major': int(match.group(1)),
+        'minor': int(match.group(2)),
+        'build': int(match.group(3)),
+    }
+
+
+def parse_rdp_ntlm_info_xml(xml_text):
+    """Extract known rdp-ntlm-info fields from Nmap's structured XML output."""
+    root = ET.fromstring(xml_text)
+    fields = {}
+    for port in root.iter('port'):
+        if port.get('protocol') != 'tcp' or port.get('portid') != '3389':
+            continue
+        for script in port.findall('script'):
+            if script.get('id') != 'rdp-ntlm-info':
+                continue
+            for element in script.iter('elem'):
+                key = element.get('key')
+                value = (element.text or '').strip()
+                if key in RDP_NTLM_FIELDS and value and key not in fields:
+                    fields[key] = value
+    return fields
+
+
+def scan_rdp_ntlm_info(device):
+    """Run the single-port, unauthenticated NSE enrichment against one known host."""
+    if not device.get('ip') or 3389 not in build_service_ports(device):
+        return {'status': 'skipped', 'fields': {}, 'reason': 'rdp_3389_not_known_open'}
+
+    profile = nmap_profile('rdp_ntlm_info')
+    with tempfile.TemporaryDirectory(prefix='netchecker_rdp_ntlm_') as directory:
+        xml_path = f'{directory}/scan.xml'
+        command = ['sudo', 'nmap', *profile['arguments'], '-p', '3389',
+                   '--script', 'rdp-ntlm-info', '-oX', xml_path, device['ip']]
+        try:
+            process = subprocess.run(command, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=profile['timeout_seconds'])
+        except subprocess.TimeoutExpired:
+            return {'status': 'timeout', 'fields': {}}
+        except (OSError, ValueError):
+            return {'status': 'nmap_error', 'fields': {}}
+
+        if process.returncode != 0:
+            return {'status': 'nmap_error', 'fields': {}}
+        try:
+            with open(xml_path, encoding='utf-8') as xml_file:
+                fields = parse_rdp_ntlm_info_xml(xml_file.read())
+        except (OSError, ET.ParseError, ValueError):
+            return {'status': 'parse_error', 'fields': {}}
+
+    if not fields:
+        return {'status': 'no_data', 'fields': {}}
+    product_version = fields.get('Product_Version')
+    return {
+        'status': 'success',
+        'fields': fields,
+        'family': 'Windows',
+        'product_version': product_version,
+        'version': parse_windows_product_version(product_version),
+        'edition': None,
+        'kernel': None,
+        'distribution': None,
+    }
+
+
 # ==========================================================
 # LIGHT
 # ==========================================================
@@ -1280,6 +1365,89 @@ def build_service_ports(device):
     return sorted(known if requested is None else known.intersection(requested))
 
 
+def rdp_ntlm_info_due(connection, network_id, device, now=None):
+    """Check port eligibility and the success/failure cooldown for RDP enrichment."""
+    if not device.get('ip') or 3389 not in build_service_ports(device):
+        return False, ''
+    latest = connection.execute("""SELECT data_json,observed_at FROM observations
+        WHERE network_id=? AND device_id=?
+          AND observation_type='rdp_ntlm_info_attempt' AND source='rdp_ntlm_info'
+        ORDER BY id DESC LIMIT 1""", (network_id, device['id'])).fetchone()
+    if latest is None:
+        return True, ''
+    now = now or datetime.now(timezone.utc)
+    try:
+        attempted = datetime.strptime(latest['observed_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        payload = json.loads(latest['data_json'] or '{}')
+    except (TypeError, ValueError):
+        return True, latest['observed_at']
+    if not isinstance(payload, dict):
+        payload = {}
+    status = payload.get('status')
+    if status == 'success':
+        interval = timedelta(days=max(1, int(os.environ.get('NETCHECKER_RDP_SUCCESS_RECHECK_DAYS', '30'))))
+    elif status == 'no_data':
+        interval = timedelta(hours=max(1, int(os.environ.get('NETCHECKER_RDP_NO_DATA_RETRY_HOURS', '12'))))
+    else:
+        interval = timedelta(hours=max(1, int(os.environ.get('NETCHECKER_RDP_RETRY_HOURS', '1'))))
+    return now - attempted >= interval, latest['observed_at']
+
+
+def enrich_rdp_ntlm_info(connection, network_id, scan_run_id, device):
+    """Persist RDP metadata and its separate, non-edition OS version evidence."""
+    try:
+        result = scan_rdp_ntlm_info(device)
+    except Exception:
+        # A malformed NSE result must not interrupt the regular enrichment cycle.
+        result = {'status': 'parse_error', 'fields': {}}
+    result = dict(result or {})
+    result.setdefault('status', 'parse_error')
+    result.setdefault('fields', {})
+    if not isinstance(result.get('fields'), dict):
+        result['fields'] = {}
+        result['status'] = 'parse_error'
+
+    with atomic(connection):
+        if result.get('status') == 'success' and result['fields']:
+            stored = {key: value for key, value in result.items()
+                      if key not in {'message', 'reason'}}
+            connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+                observation_type,source,data_json) VALUES(?,?,?,'rdp_ntlm_info','rdp_ntlm_info',?)""",
+                (network_id, device['id'], scan_run_id,
+                 json.dumps(stored, ensure_ascii=False, sort_keys=True)))
+            if result.get('product_version'):
+                save_os_claims(connection, network_id, scan_run_id, device['id'], [{
+                    'kind': 'version',
+                    'value': result['product_version'],
+                    'source': 'rdp_ntlm_info',
+                    'status': 'suspected',
+                    'confidence': 95,
+                    'evidence': {
+                        'fields': result['fields'],
+                        'version': result.get('version'),
+                        'edition': 'unknown',
+                    },
+                }])
+        attempt = {key: value for key, value in result.items()
+                   if key not in {'fields', 'family', 'edition', 'kernel', 'distribution'}}
+        attempt['status'] = result.get('status')
+        connection.execute("""INSERT INTO observations(network_id,device_id,scan_run_id,
+            observation_type,source,data_json) VALUES(?,?,?,'rdp_ntlm_info_attempt','rdp_ntlm_info',?)""",
+            (network_id, device['id'], scan_run_id,
+             json.dumps(attempt, ensure_ascii=False, sort_keys=True)))
+
+    status = result.get('status')
+    return {
+        'success': status == 'success',
+        'technical_error': status in {'timeout', 'nmap_error', 'parse_error'},
+        'temporary_unreachable': False,
+        'timeout': status == 'timeout',
+        'stage': 'rdp_ntlm_info',
+        'os': None,
+        'rdp_status': status,
+    }
+
+
 def service_enrichment_due(connection, network_id, device):
     """Return due known ports and last attempt time; reuse recent complete probes."""
     ports = build_service_ports(device)
@@ -1444,6 +1612,7 @@ def get_enrichment_targets(
 
     targets = []
     service_candidates = []
+    rdp_candidates = []
     device_enrichment_candidates = []
 
 
@@ -1457,6 +1626,8 @@ def get_enrichment_targets(
         "service_targets": 0,
         "service_deferred": 0,
         "device_targets": 0,
+        "rdp_targets": 0,
+        "rdp_deferred": 0,
     }
 
 
@@ -1496,6 +1667,10 @@ def get_enrichment_targets(
         service_due, attempted_at = service_enrichment_due(connection,network_id,device)
         if service_due and not force:
             service_candidates.append((attempted_at,dict(device,_service_ports=service_due)))
+
+        rdp_due, rdp_attempted_at = rdp_ntlm_info_due(connection, network_id, device)
+        if rdp_due and not force:
+            rdp_candidates.append((rdp_attempted_at, device))
 
         due_device_enrichers = device_enrichment_due(connection, network_id, device)
         if due_device_enrichers:
@@ -1577,6 +1752,8 @@ def get_enrichment_targets(
 
     selected = targets + select_service_targets(targets,service_candidates,stats)
     selected_by_id = {device['id']: index for index, (device, _) in enumerate(selected)}
+    selected = select_rdp_targets(selected, rdp_candidates, stats, selected_by_id)
+    selected_by_id = {device['id']: index for index, (device, _) in enumerate(selected)}
     for device, sources in device_enrichment_candidates:
         index = selected_by_id.get(device['id'])
         if index is None:
@@ -1606,6 +1783,26 @@ def select_service_targets(os_targets, candidates, stats):
     stats['service_targets'] = len(selected)
     stats['service_deferred'] = max(0,len(eligible)-len(selected))
     stats['targets'] += len(selected)
+    return selected
+
+
+def select_rdp_targets(selected, candidates, stats, selected_by_id=None):
+    """Attach RDP work to existing host work or add oldest due hosts within budget."""
+    selected_by_id = selected_by_id or {device['id']: index for index, (device, _) in enumerate(selected)}
+    eligible = sorted(candidates, key=lambda item: (item[0], item[1]['id']))
+    budget = max(0, int(os.environ.get('NETCHECKER_RDP_MAX_HOSTS', '2')))
+    chosen = eligible[:budget]
+    stats['rdp_deferred'] = max(0, len(eligible) - len(chosen))
+    for _, device in chosen:
+        index = selected_by_id.get(device['id'])
+        if index is None:
+            selected.append((dict(device, _enrichment_goal='rdp_ntlm_info'), classify_device(device)))
+            selected_by_id[device['id']] = len(selected) - 1
+            stats['targets'] += 1
+        else:
+            existing, classification = selected[index]
+            selected[index] = (dict(existing, _rdp_ntlm_info=True), classification)
+    stats['rdp_targets'] = len(chosen)
     return selected
 
 
@@ -1654,6 +1851,8 @@ def print_selection_stats(stats):
     )
     print(f"Service-Kandidaten.......: {stats['service_targets']}")
     print(f"Service wegen Budget später: {stats['service_deferred']}")
+    print(f"RDP-NTLM-Kandidaten......: {stats.get('rdp_targets', 0)}")
+    print(f"RDP-NTLM wegen Budget später: {stats.get('rdp_deferred', 0)}")
 
     print("=" * 80)
 
@@ -2391,6 +2590,9 @@ def run_enrichment(
     light_success = 0
     deep_success = 0
     service_success = 0
+    rdp_attempted = 0
+    rdp_success = 0
+    rdp_failures = 0
 
     without_os = 0
 
@@ -2447,15 +2649,40 @@ def run_enrichment(
             )
 
 
+            # Run the short, targeted protocol probe before potentially longer
+            # OS or service stages attached to the same device.
+            if device.get('_rdp_ntlm_info'):
+                rdp_result = enrich_rdp_ntlm_info(connection, network_id, scan_run_id, device)
+                rdp_attempted += 1
+                if rdp_result.get('success'):
+                    rdp_success += 1
+                    print('  RDP-NTLM: Metadaten erfasst')
+                elif rdp_result.get('technical_error'):
+                    rdp_failures += 1
+                    print(f"  RDP-NTLM: {rdp_result.get('rdp_status')}")
+                else:
+                    print(f"  RDP-NTLM: {rdp_result.get('rdp_status')}")
+
+
             if device.get('_enrichment_goal') == 'service':
                 print('  Stufe: Service-LIGHT auf bekannten offenen TCP-Ports; keine OS-Erkennung')
                 result = enrich_services(connection,network_id,scan_run_id,device)
+            elif device.get('_enrichment_goal') == 'rdp_ntlm_info':
+                print('  Stufe: RDP-NTLM-Metadaten auf bekannt offenem TCP/3389')
+                result = enrich_rdp_ntlm_info(connection, network_id, scan_run_id, device)
             elif device.get('_enrichment_goal') == 'device':
                 result = {'success': True, 'technical_error': False,
                           'temporary_unreachable': False, 'timeout': False,
                           'stage': 'device_api', 'os': None}
             else:
                 result = enrich_device(connection,network_id,scan_run_id,device,force=force)
+
+            if result.get('stage') == 'rdp_ntlm_info':
+                rdp_attempted += 1
+                if result.get('success'):
+                    rdp_success += 1
+                elif result.get('technical_error'):
+                    rdp_failures += 1
 
 
             if result.get('stage') != 'device_api' and result[
@@ -2494,6 +2721,8 @@ def run_enrichment(
 
                     if result['stage'] == 'service_light':
                         service_success += 1
+                    elif result['stage'] == 'rdp_ntlm_info':
+                        pass
                     elif (
                         result["stage"]
                         == "light"
@@ -2505,7 +2734,7 @@ def run_enrichment(
 
                         deep_success += 1
 
-                else:
+                elif result.get('stage') != 'rdp_ntlm_info':
 
                     without_os += 1
 
@@ -2519,7 +2748,6 @@ def run_enrichment(
                     print(f"  Geräte-API {source}: {identification.get('reason') or 'nicht erkannt'}")
             if result.get('stage') == 'device_api':
                 processed += 1
-
 
             # ==================================================
             # Aktuellen Zustand erneut aus SQLite lesen
@@ -2589,6 +2817,9 @@ def run_enrichment(
             f"{deep_success}"
         )
         print(f"Service-LIGHT erfolgreich: {service_success}")
+        print(f"RDP-NTLM versucht.......: {rdp_attempted}")
+        print(f"RDP-NTLM erfolgreich....: {rdp_success}")
+        print(f"RDP-NTLM Fehler.........: {rdp_failures}")
 
         print(
             f"OS nicht ermittelbar.: "

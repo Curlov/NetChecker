@@ -1,5 +1,6 @@
 """Employee registration tied to the request's source address."""
 import ipaddress
+import json
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -93,6 +94,24 @@ async def register_employee(request: Request):
     try:
         with get_write_connection() as db:
             result = save_device_name(db, match['id'], match['network_id'], name)
+            # The successful request proves this address reached the web server.
+            # Keep that evidence in the existing observation stream so the
+            # timeline trigger records it, independently of Nmap discovery.
+            db.execute('''INSERT INTO observations
+                (network_id,device_id,observation_type,source,data_json)
+                VALUES (?,?,'host_discovery','web_registration',?)''',
+                (match['network_id'], match['id'], json.dumps({'ip': source_ip})))
+            db.execute('''UPDATE addresses SET last_seen=CURRENT_TIMESTAMP
+                WHERE network_id=? AND device_id=? AND ip=?''',
+                (match['network_id'], match['id'], source_ip))
+            db.execute('UPDATE devices SET last_seen=CURRENT_TIMESTAMP WHERE id=?', (match['id'],))
+            db.execute('''INSERT INTO device_presence
+                (network_id,device_id,state,consecutive_misses,updated_at)
+                VALUES (?,?,'present',0,CURRENT_TIMESTAMP)
+                ON CONFLICT(network_id,device_id) DO UPDATE SET
+                    state='present',consecutive_misses=0,
+                    missing_since_scan_run_id=NULL,updated_at=CURRENT_TIMESTAMP''',
+                (match['network_id'], match['id']))
     except HTTPException as error:
         return page(request, message=error.detail, error=True, name=name)
     return page(request, message='Registrierung gespeichert.', name=result['display_name'])

@@ -107,6 +107,28 @@ class InventoryTest(unittest.TestCase):
         self.assertEqual(1,state['consecutive_misses'])
         self.assertEqual('present',state['state'])
 
+    def test_recent_web_registration_prevents_nmap_miss(self):
+        device, run = self.host()
+        database.detect_discovery_changes(self.db, self.network, run)
+        self.db.execute('''INSERT INTO observations
+            (network_id,device_id,observation_type,source,data_json)
+            VALUES (?,?,'host_discovery','web_registration','{"ip":"192.0.2.10"}')''',
+            (self.network, device))
+        missed = database.start_scan_run(self.db, self.network, 'discovery')
+        database.finish_scan_run(self.db, missed)
+        database.detect_discovery_changes(self.db, self.network, missed)
+        state = self.db.execute('SELECT state,consecutive_misses FROM device_presence WHERE device_id=?',
+                                (device,)).fetchone()
+        self.assertEqual(('present', 0), tuple(state))
+        self.db.execute('''UPDATE observations SET observed_at=datetime('now','-20 minutes')
+            WHERE device_id=? AND source='web_registration' ''', (device,))
+        missed = database.start_scan_run(self.db, self.network, 'discovery')
+        database.finish_scan_run(self.db, missed)
+        database.detect_discovery_changes(self.db, self.network, missed)
+        state = self.db.execute('SELECT state,consecutive_misses FROM device_presence WHERE device_id=?',
+                                (device,)).fetchone()
+        self.assertEqual(('present', 1), tuple(state))
+
     def test_nested_failure_rolls_back_enrichment(self):
         device,run = self.host()
         result = {'status':'success','ports':[{'port':22,'protocol':'tcp','state':'open'}]}
@@ -298,6 +320,53 @@ class PureTest(unittest.TestCase):
 class PipelineTest(unittest.TestCase):
     setUp = InventoryTest.setUp
     tearDown = InventoryTest.tearDown
+
+    def test_new_device_gets_immediate_separate_detail_scan(self):
+        import netchecker_core as core
+        import runtime_lock
+        old_run = database.start_scan_run(self.db, self.network, 'discovery')
+        old_id = database.save_discovery_host(self.db, self.network, old_run,
+            {'ip':'192.0.2.10','mac':'00:11:22:33:44:55'})
+        database.finish_scan_run(self.db, old_run)
+        hosts = [
+            {'ip':'192.0.2.10','mac':'00:11:22:33:44:55'},
+            {'ip':'192.0.2.11','mac':'00:11:22:33:44:66'},
+        ]
+        details = {'ports':[{'protocol':'tcp','port':443,'state':'open'}],
+                   'scan_metadata':{'complete':True,
+                                    'scaninfo':[{'protocol':'tcp','services':'443'}]},
+                   'os':None}
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(runtime_lock, 'DATABASE_PATH', Path(directory)/'test.db'))
+            stack.enter_context(patch.object(core, 'scan_network', return_value=hosts))
+            stack.enter_context(patch.object(core, 'enrich_local_host', side_effect=lambda found,interface:found))
+            stack.enter_context(patch.object(core, 'get_vendor_from_mac', return_value=None))
+            detail_scan = stack.enter_context(patch.object(core, 'scan_host_details', return_value=details))
+            stack.enter_context(patch.object(core, 'run_classification_cycle'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            discovered = core.run_discovery_cycle(self.db, self.network,
+                {'network':'192.0.2.0/24','interface':'test0'})
+            self.assertFalse(discovered[0]['new_device'])
+            self.assertTrue(discovered[1]['new_device'])
+            scanned = core.run_initial_detail_cycle(self.db, self.network, discovered)
+        self.assertEqual({discovered[1]['device_id']}, scanned)
+        self.assertNotIn(old_id, scanned)
+        detail_scan.assert_called_once_with('192.0.2.11')
+        self.assertEqual('detail_initial', self.db.execute('''SELECT scan_type FROM scan_runs
+            WHERE scan_type='detail_initial' ORDER BY id DESC LIMIT 1''').fetchone()[0])
+        self.assertEqual(443, database.get_port_inventory(
+            self.db, self.network, discovered[1]['device_id'])[0]['port'])
+
+    def test_failed_initial_scan_remains_eligible_for_regular_detail(self):
+        import netchecker_core as core
+        import runtime_lock
+        host = {'ip':'192.0.2.11','mac':'00:11:22:33:44:66',
+                'device_id':7,'new_device':True}
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(runtime_lock, 'DATABASE_PATH', Path(directory)/'test.db'))
+            stack.enter_context(patch.object(core, 'scan_host_details', return_value=None))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            self.assertEqual(set(), core.run_initial_detail_cycle(self.db, self.network, [host]))
 
     def test_synthetic_pipeline_does_not_execute_external_commands(self):
         import netchecker_core as core

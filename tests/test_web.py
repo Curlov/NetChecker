@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlencode
 import schema
 import database
 from web.main import app
+from web.routers.devices import get_device
 
 
 async def asgi_request(method, url, headers=(), body=None, client=('synthetic',1)):
@@ -106,8 +107,22 @@ class WebTest(unittest.TestCase):
     def test_detail_has_new_evidence_fields(self):
         status,data = self.request(f'/api/devices/{self.ids[0]}?network_id={self.network}')
         self.assertEqual(200,status)
-        for field in ('mac_analysis','os_summary','os_claims','interfaces','identity_candidates','port_history'):
+        for field in ('mac_analysis','os_summary','os_claims','interfaces','identity_candidates','port_history','rdp_ntlm_info'):
             self.assertIn(field,data)
+
+    def test_device_details_include_persisted_rdp_ntlm_info(self):
+        payload = {'status':'success','family':'Windows','product_version':'10.0.26100',
+                   'version':{'major':10,'minor':0,'build':26100},'edition':None,
+                   'fields':{'NetBIOS_Computer_Name':'BC-CEO'}}
+        connection = sqlite3.connect(self.path)
+        connection.execute("""INSERT INTO observations(network_id,device_id,observation_type,
+            source,data_json) VALUES(?,?,'rdp_ntlm_info','rdp_ntlm_info',?)""",
+            (self.network,self.ids[0],json.dumps(payload)))
+        connection.commit(); connection.close()
+        data = get_device(self.ids[0], network_id=self.network)
+        self.assertEqual('10.0.26100',data['rdp_ntlm_info']['product_version'])
+        self.assertEqual('BC-CEO',data['rdp_ntlm_info']['fields']['NetBIOS_Computer_Name'])
+        self.assertEqual('rdp_ntlm_info',data['rdp_ntlm_info']['source'])
 
     def test_device_details_return_confirmed_device_identification(self):
         payload = {'status':'confirmed','manufacturer':'Samsung','type':'Samsung Smart-TV',
@@ -1799,8 +1814,20 @@ class WebTest(unittest.TestCase):
         self.assertIn('Registrierung gespeichert.', body.decode())
         connection = sqlite3.connect(self.path)
         name = connection.execute('SELECT display_name FROM devices WHERE id=?', (self.ids[1],)).fetchone()[0]
+        evidence = connection.execute('''SELECT source, json_extract(data_json,'$.ip')
+            FROM observations WHERE device_id=? AND source='web_registration'
+            ORDER BY id DESC LIMIT 1''', (self.ids[1],)).fetchone()
+        presence = connection.execute('SELECT state FROM device_presence WHERE network_id=? AND device_id=?',
+                                      (self.network, self.ids[1])).fetchone()
+        timeline = connection.execute('''SELECT kind FROM timeline_events
+            WHERE device_id=? AND source_id=(SELECT max(id) FROM observations
+                WHERE device_id=? AND source='web_registration')''',
+            (self.ids[1], self.ids[1])).fetchone()
         connection.close()
         self.assertEqual('Neuer Name', name)
+        self.assertEqual(('web_registration', '192.0.2.2'), evidence)
+        self.assertEqual(('present',), presence)
+        self.assertEqual((1,), timeline)
 
     def test_employee_registration_does_not_accept_submitted_target(self):
         status, body = asyncio.run(asgi_request(

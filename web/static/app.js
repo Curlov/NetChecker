@@ -1281,6 +1281,31 @@ async function showDevice(deviceId, scroll = true) {
 
         // Betriebssystem
         const osDetails = document.querySelector("#detail-os");
+        const rdpDetails = document.querySelector("#detail-os-rdp");
+        rdpDetails.replaceChildren();
+        const rdp = data.rdp_ntlm_info;
+        if (rdp) {
+            const fields = rdp.fields || {};
+            const preciseWindows = (data.os_information || []).find(item =>
+                /^windows\b/i.test(item.name || '') && Number(item.accuracy || 0) >= 70);
+            addDetailLine(rdpDetails, "Familie", rdp.family || "Windows");
+            const build = rdp.version?.build;
+            addDetailLine(rdpDetails, "Version", rdp.product_version
+                ? `${rdp.product_version}${build == null ? '' : ` · Build ${build}`}` : null);
+            addDetailLine(rdpDetails, "Edition", preciseWindows?.name || "Unbekannt");
+            addDetailLine(rdpDetails, "Kernel", rdp.kernel || "-");
+            addDetailLine(rdpDetails, "Distribution", rdp.distribution || "-");
+            addDetailLine(rdpDetails, "Erkennungsquelle", "RDP-NTLM");
+            addDetailLine(rdpDetails, "Zuletzt geprüft", formatEventTime(rdp.observed_at));
+            for (const [key, label] of [
+                ["Target_Name", "RDP-Zielname"],
+                ["NetBIOS_Domain_Name", "NetBIOS-Domäne"],
+                ["NetBIOS_Computer_Name", "NetBIOS-Computername"],
+                ["DNS_Domain_Name", "DNS-Domäne"],
+                ["DNS_Computer_Name", "DNS-Computername"],
+                ["DNS_Tree_Name", "DNS-Baum"]
+            ]) addDetailLine(rdpDetails, label, fields[key]);
+        }
         if (data.os_information?.length) {
             renderDetailTable(osDetails, data.os_information, [
                 ["name", "Betriebssystem"],

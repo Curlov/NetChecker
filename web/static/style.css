@@ -805,12 +805,15 @@ header nav .nav-config-link::before { content:"|"; position:absolute; left:0; co
 .topology-context-menu[hidden] { display:none; }
 .topology-context-menu h3 { margin:0 0 2px; color:#67e8f9; font-size:1rem; overflow-wrap:anywhere; }
 .topology-context-menu p, .topology-context-menu small { margin:0; color:#94a3b8; font-size:.82rem; overflow-wrap:anywhere; }
-.topology-context-menu button, .topology-context-menu input, .topology-context-menu select, .topology-context-menu textarea {
+.topology-context-menu button, .topology-context-menu a.topology-menu-action,
+.topology-context-menu input, .topology-context-menu select, .topology-context-menu textarea {
     box-sizing:border-box; min-width:0; min-height:32px; width:100%; margin:0; padding:6px 8px;
     color:#e2e8f0; border:1px solid #475569; border-radius:5px; background:#0f172a; font:inherit;
 }
+.topology-context-menu a.topology-menu-action { display:block; text-decoration:none; }
 .topology-context-menu button { text-align:left; cursor:pointer; }
-.topology-context-menu button:hover, .topology-context-menu button:focus-visible {
+.topology-context-menu button:hover, .topology-context-menu button:focus-visible,
+.topology-context-menu a.topology-menu-action:hover, .topology-context-menu a.topology-menu-action:focus-visible {
     border-color:#38bdf8; background:#17263c;
 }
 .topology-context-menu button.danger { color:#fecaca; border-color:#7f1d1d; }

@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from web.database import get_connection, get_write_connection
-from database import get_port_inventory, get_os_history, get_os_claims, get_os_claims_for_devices
+from database import (get_port_inventory, get_os_history, get_os_claims,
+                      get_os_claims_for_devices, get_rdp_ntlm_info)
 from os_analysis import summarize_claims
 from mac_analysis import analyze_mac
 from fingerprints import match_device as match_fingerprints
@@ -327,6 +328,7 @@ def get_device(
         # --------------------------------------------------
 
         os_info = get_os_history(db, network_id, device_id)[:20]
+        rdp_ntlm_info = get_rdp_ntlm_info(db, network_id, device_id)
         os_claims = get_os_claims(db, network_id, device_id)
         port_history = db.execute("""SELECT source,observed_at,scan_run_id,data_json
             FROM observations WHERE network_id=? AND device_id=?
@@ -442,6 +444,7 @@ def get_device(
         ),
         "ports": [dict(row) for row in ports],
         "os_information": [dict(row) for row in os_info],
+        "rdp_ntlm_info": rdp_ntlm_info,
         "classification_history": [
             dict(row) for row in history
         ],

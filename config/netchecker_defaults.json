@@ -35,6 +35,10 @@
     "services": {
       "arguments": ["-Pn", "-n", "-sS", "-sV", "--version-light", "-T4", "--max-retries", "1", "--host-timeout", "25s"],
       "timeout_seconds": 35
+    },
+    "rdp_ntlm_info": {
+      "arguments": ["-Pn", "-n", "-sS", "-T3", "--max-retries", "1", "--host-timeout", "12s"],
+      "timeout_seconds": 15
     }
   }
 }
