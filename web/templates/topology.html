@@ -1,5 +1,8 @@
 <section class="panel" id="topology-panel">
-    <div class="panel-heading"><h2>Netzwerktopologie</h2><span id="topology-status"></span></div>
+    <div class="panel-heading">
+        <h2>Netzwerktopologie</h2><span id="topology-status"></span>
+        <button id="topology-export-open" class="topology-export-open" type="button">PDF exportieren</button>
+    </div>
     <div class="toolbar">
         <button id="topology-reset" type="button">Ansicht zentrieren</button>
         <span id="topology-save-status" class="topology-save-status" role="status" aria-live="polite">Layout noch nicht geladen</span>
@@ -33,3 +36,82 @@
     <pre id="topology-evidence" tabindex="0"></pre>
     <div id="topology-context-menu" class="topology-context-menu" role="dialog" aria-label="Objektaktionen" hidden></div>
 </section>
+
+<dialog id="topology-export-dialog" class="topology-export-dialog" aria-labelledby="topology-export-title">
+    <div class="topology-export-heading">
+        <div><h2 id="topology-export-title">Topologie als PDF exportieren</h2>
+            <p>Plan im Papierrahmen ausrichten: ziehen zum Verschieben, Mausrad zum Vergrößern.</p></div>
+        <button id="topology-export-close" type="button" aria-label="Dialog schließen">Schließen</button>
+    </div>
+    <div class="topology-export-layout">
+        <form id="topology-export-settings" class="topology-export-settings">
+            <div class="topology-export-tabs" role="tablist" aria-label="Exporteinstellungen">
+                <button id="topology-export-tab-page" type="button" role="tab" aria-selected="true"
+                    aria-controls="topology-export-page-settings">Seite</button>
+                <button id="topology-export-tab-content" type="button" role="tab" aria-selected="false" tabindex="-1"
+                    aria-controls="topology-export-content-settings">Inhalte</button>
+            </div>
+            <div id="topology-export-page-settings" role="tabpanel" aria-labelledby="topology-export-tab-page">
+                <div class="topology-export-control-grid">
+                    <label><span>Papierformat</span><select id="topology-export-paper">
+                        <option>A4</option><option selected>A3</option><option>A2</option><option>A1</option>
+                    </select></label>
+                    <label><span>Ausrichtung</span><select id="topology-export-orientation">
+                        <option value="landscape" selected>Querformat</option><option value="portrait">Hochformat</option>
+                    </select></label>
+                    <label><span>Seitenränder</span><select id="topology-export-margin">
+                        <option value="none" selected>0 mm</option><option value="small">7 mm</option>
+                    </select></label>
+                    <label><span>Seitenaufteilung</span><select id="topology-export-pagination">
+                        <option value="one" selected>Eine Seite</option><option value="multi">Mehrere Seiten</option>
+                    </select></label>
+                </div>
+                <div id="topology-export-grid-settings" class="topology-export-control-grid" hidden>
+                    <label><span>Seiten nebeneinander</span><input id="topology-export-columns" type="number" min="1" max="8" step="1" value="2"></label>
+                    <label><span>Seiten untereinander</span><input id="topology-export-rows" type="number" min="1" max="8" step="1" value="1"></label>
+                </div>
+                <label class="topology-export-padding-label"><span>Abstand beim Einpassen (Rasterzellen)</span>
+                    <input id="topology-export-padding" type="number" min="0" max="50" step="0.5" value="1"></label>
+                <label class="topology-export-check"><input type="checkbox" data-export-option="header" checked><span>Kopfzeile drucken</span></label>
+                <p class="topology-export-help">Der Papierrahmen zeigt das PDF. Die gestrichelte Linie markiert die nutzbare Planfläche. Mehrere Seiten überlappen sich um 8 mm.</p>
+            </div>
+            <div id="topology-export-content-settings" role="tabpanel" aria-labelledby="topology-export-tab-content" hidden>
+                <div class="topology-export-options">
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="devices" checked><span>Geräte</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="ip" checked><span>IP-Adressen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="names" checked><span>Gerätenamen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="manual" checked><span>Manuelle Nodes</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="rooms" checked><span>Räume mit Namen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="links" checked><span>Verbindungen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="linkLabels" checked><span title="Verbindungsbeschriftungen">Verbindungsnamen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="mac"><span>MAC-Adressen</span></label>
+                    <label class="topology-export-check"><input type="checkbox" data-export-option="details"><span title="Zusätzliche Geräteinformationen">Geräteinfos</span></label>
+                </div>
+            </div>
+        </form>
+        <section class="topology-export-preview" aria-label="Interaktive Druckvorschau">
+            <div class="topology-export-preview-toolbar">
+                <strong id="topology-export-page-count">Vorschau</strong>
+                <button id="topology-export-current-view" type="button" title="Den aktuellen Ausschnitt der Topologie übernehmen">Aktuelle Ansicht</button>
+                <button id="topology-export-fit" type="button">Alles einpassen</button>
+            </div>
+            <div id="topology-export-pages" class="topology-export-canvas" tabindex="0" role="group"
+                aria-label="PDF-Ausschnitt mit der Maus verschieben und per Mausrad zoomen"
+                aria-describedby="topology-export-canvas-help"></div>
+            <p id="topology-export-canvas-help" class="topology-export-canvas-help">Ziehen: Plan verschieben · Mausrad: zoomen · Tastatur: Pfeile und + / −</p>
+        </section>
+    </div>
+    <div class="topology-export-footer">
+        <div class="topology-export-feedback">
+            <div id="topology-export-readability" class="topology-export-readability" role="status" aria-live="polite">
+                <div class="topology-export-readability-size" aria-hidden="true">
+                    <span>Lesbarkeit: Eingeschränkt · kleinste Schrift 9999,9 pt</span>
+                    <small>Zum Vergrößern hineinzoomen; bei Bedarf mehr Seiten oder größeres Papier wählen.</small>
+                </div>
+                <div id="topology-export-readability-message"></div>
+            </div>
+            <p id="topology-export-error" class="topology-export-error" role="alert" hidden></p>
+        </div>
+        <button id="topology-export-print" type="button" disabled>PDF drucken / speichern</button>
+    </div>
+</dialog>

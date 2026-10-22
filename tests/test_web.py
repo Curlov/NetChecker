@@ -1537,7 +1537,7 @@ class WebTest(unittest.TestCase):
         self.assertIn('setRoomShape(group,movedRoom,rect,label,null,state.internalLinkIds);',script)
         template=(Path(__file__).parents[1]/'web/templates/index.html').read_text()
         self.assertIn('/static/topology.js?v=manual-segments-9',template)
-        self.assertIn('/static/style.css?v=configuration-page-4',template)
+        self.assertIn('/static/style.css?v=pdf-canvas-4',template)
         style=(Path(__file__).parents[1]/'web/static/style.css').read_text()
         self.assertIn('topology-room-drop-target',style)
         self.assertNotIn('.topology-help',style)
@@ -1696,6 +1696,57 @@ class WebTest(unittest.TestCase):
         self.assertIn('A parallel route two pixels from the room frame violates the half-cell clearance',harness)
         self.assertIn('Exact fractional anchors are routed without grid conversion',harness)
         self.assertIn('The pixel fallback keeps two bends around a device obstacle',harness)
+
+    def test_topology_pdf_export_renders_one_interactive_preview_and_settings(self):
+        from html.parser import HTMLParser
+
+        class Elements(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.elements=[]
+
+            def handle_starttag(self, tag, attributes):
+                self.elements.append((tag,dict(attributes)))
+
+        from starlette.requests import Request
+        from web.main import home
+        response=home(Request({'type':'http','scheme':'http','path':'/topology',
+                               'headers':[],'query_string':b'','server':('synthetic',8000)}))
+        self.assertEqual(200,response.status_code)
+        parser=Elements()
+        parser.feed(response.body.decode())
+        ids=[attrs['id'] for _,attrs in parser.elements if 'id' in attrs]
+        self.assertEqual(len(ids),len(set(ids)), 'Controls must have unique IDs')
+        by_id={attrs['id']:(tag,attrs) for tag,attrs in parser.elements if 'id' in attrs}
+        for control in ('topology-export-open','topology-export-dialog','topology-export-pages',
+                        'topology-export-paper','topology-export-orientation','topology-export-margin',
+                        'topology-export-pagination','topology-export-columns','topology-export-rows',
+                        'topology-export-current-view','topology-export-fit','topology-export-readability'):
+            self.assertIn(control,by_id)
+        for obsolete in ('topology-export-overview','topology-export-scale','topology-export-zoom-value',
+                         'topology-range-tools','topology-export-pick-area'):
+            self.assertNotIn(obsolete,by_id)
+        options={attrs['data-export-option']:attrs for _,attrs in parser.elements
+                 if 'data-export-option' in attrs}
+        defaults={'devices':True,'ip':True,'names':True,'manual':True,'rooms':True,
+                  'links':True,'linkLabels':True,'mac':False,'details':False,'header':True}
+        self.assertEqual(set(defaults),set(options))
+        for name,checked in defaults.items():
+            self.assertEqual('checkbox',options[name]['type'])
+            self.assertEqual(checked,'checked' in options[name])
+        for _,attrs in parser.elements:
+            if attrs.get('role')=='tab' and attrs.get('id','').startswith('topology-export-'):
+                _,panel=by_id[attrs['aria-controls']]
+                self.assertEqual('tabpanel',panel['role'])
+                self.assertEqual(attrs['id'],panel['aria-labelledby'])
+                self.assertEqual(attrs['aria-selected']=='false','hidden' in panel)
+        export_scripts=[attrs['src'] for tag,attrs in parser.elements
+                        if tag=='script' and '/static/topology-export' in attrs.get('src','')]
+        self.assertEqual(2,len(export_scripts))
+        for url in export_scripts:
+            asset=Path(__file__).parents[1]/'web'/urlsplit(url).path.lstrip('/')
+            self.assertTrue(asset.is_file())
+            self.assertTrue(asset.read_text())
 
     def test_topology_manual_segments_use_existing_links_and_canvas_coordinates(self):
         root=Path(__file__).parents[1]
